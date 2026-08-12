@@ -1,0 +1,22 @@
+{
+  "reviewers": [
+    {
+      "level": 0,
+      "model": "primary-provider/fast-reviewer",
+      "reasoning": "low",
+      "timeoutMs": 30000
+    },
+    {
+      "level": 0,
+      "model": "fallback-provider/fast-reviewer",
+      "reasoning": "low",
+      "timeoutMs": 30000
+    },
+    {
+      "level": 1,
+      "model": "primary-provider/strong-reviewer",
+      "reasoning": "medium",
+      "timeoutMs": 60000
+    }
+  ]
+}

@@ -204,3 +204,86 @@ test("malformed pi-perm configuration installs a fail-closed gate", async () => 
     /failed to initialize/,
   );
 });
+
+test("an in-flight model approval is invalidated by a config reload", async () => {
+  const runtime = mkdtempSync(
+    join(tmpdir(), "pi-permission-reviewer-runtime-"),
+  );
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const reviewerConfig = join(runtime, "reviewers.json");
+  writeFileSync(
+    reviewerConfig,
+    JSON.stringify({ reviewers: [{ level: 0, model: "test/reviewer" }] }),
+  );
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
+
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const commands = new Map<string, (...args: any[]) => unknown>();
+  const pi = {
+    events: { emit() {} },
+    registerTool() {},
+    registerCommand(name: string, command: { handler: (...args: any[]) => unknown }) {
+      commands.set(name, command.handler);
+    },
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  };
+  await permissionReviewer(pi as any);
+
+  let finishReview!: () => void;
+  const reviewStarted = new Promise<void>((resolveStarted) => {
+    finishReview = resolveStarted;
+  });
+  let releaseReview!: () => void;
+  const reviewReleased = new Promise<void>((resolveReleased) => {
+    releaseReview = resolveReleased;
+  });
+  const model = { provider: "test", id: "reviewer" };
+  const toolResult = handlers.get("tool_call")!(
+    {
+      toolName: "bash",
+      toolCallId: "config-race",
+      input: { command: "echo hello" },
+    },
+    {
+      cwd: process.cwd(),
+      hasUI: false,
+      signal: undefined,
+      ui: {},
+      modelRegistry: {
+        find: () => model,
+        hasConfiguredAuth: () => true,
+        complete: async () => {
+          finishReview();
+          await reviewReleased;
+          return {
+            stopReason: "stop",
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ decision: "allow", reason: "safe" }),
+              },
+            ],
+          };
+        },
+      },
+    },
+  ) as Promise<unknown>;
+  await reviewStarted;
+  writeFileSync(reviewerConfig, JSON.stringify({ reviewers: [] }));
+  await commands.get("permission-reviewer")!("reload", {
+    hasUI: false,
+    scopedModels: [],
+    modelRegistry: {},
+    ui: { notify() {} },
+  });
+  releaseReview();
+
+  const result = (await toolResult) as { block?: boolean; reason?: string };
+  assert.equal(result.block, true);
+  assert.match(String(result.reason), /configuration changed/);
+});

@@ -1,27 +1,20 @@
-import { existsSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   PermissionReviewerConfig,
   ReviewerConfig,
 } from "./types.ts";
 
-const DEFAULT_CONFIG: PermissionReviewerConfig = {
-  reviewers: [
-    {
-      level: 0,
-      model: "openai-codex/gpt-5.6-luna",
-      reasoning: "low",
-      timeoutMs: 30_000,
-    },
-    {
-      level: 1,
-      model: "openai-codex/gpt-5.6-terra",
-      reasoning: "medium",
-      timeoutMs: 60_000,
-    },
-  ],
-};
+const DEFAULT_CONFIG: PermissionReviewerConfig = { reviewers: [] };
 
 export interface LoadedConfig {
   config: PermissionReviewerConfig;
@@ -51,8 +44,8 @@ export function loadConfig(path = defaultConfigPath()): LoadedConfig {
 
 export function validateConfig(value: unknown): PermissionReviewerConfig {
   if (!isRecord(value)) throw new Error("expected an object");
-  if (!Array.isArray(value.reviewers) || value.reviewers.length === 0) {
-    throw new Error("reviewers must be a non-empty array");
+  if (!Array.isArray(value.reviewers)) {
+    throw new Error("reviewers must be an array");
   }
   const reviewers = value.reviewers.map(validateReviewer);
   if (value.policy !== undefined && typeof value.policy !== "string") {
@@ -62,6 +55,31 @@ export function validateConfig(value: unknown): PermissionReviewerConfig {
     reviewers,
     ...(value.policy ? { policy: value.policy } : {}),
   };
+}
+
+export function saveConfig(
+  config: PermissionReviewerConfig,
+  path = defaultConfigPath(),
+): LoadedConfig {
+  const validated = validateConfig(config);
+  const directory = dirname(path);
+  const temporary = join(
+    directory,
+    `.permission-reviewer.${process.pid}.${Date.now()}.tmp`,
+  );
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  try {
+    writeFileSync(temporary, `${JSON.stringify(validated, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    renameSync(temporary, path);
+    chmodSync(path, 0o600);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  return { config: validated, source: path, warnings: [], valid: true };
 }
 
 export function defaultConfigPath(): string {

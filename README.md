@@ -36,15 +36,46 @@ Install Anthropic Sandbox Runtime separately so `pi-perm` can wrap bash:
 npm install -g @anthropic-ai/sandbox-runtime
 ```
 
-## Reviewer configuration
+## Configure inside Pi
 
-Copy `config.example.json` to:
+Run:
+
+```text
+/permission-reviewer
+```
+
+The interactive menu can add and remove reviewers, change same-level fallback
+order, edit the additional policy, or open the complete JSON in Pi's editor.
+Changes are written atomically, use user-only file permissions on Unix, and take
+effect in the running Pi session.
+
+Subcommands are available for direct access:
+
+```text
+/permission-reviewer status
+/permission-reviewer configure
+/permission-reviewer models
+/permission-reviewer reload
+```
+
+`models` uses Pi's current model scope when one is configured with
+`enabledModels` or `--models`; otherwise it lists authenticated models from
+Pi's registry. Choosing a reviewer never changes the conversation model.
+
+With no configuration, the extension deliberately runs in human-only mode. It
+does not assume an OpenAI account, choose a provider, or consume model quota
+until reviewers are explicitly configured.
+
+## Configuration file
+
+The UI manages:
 
 ```text
 ~/.pi/agent/permission-reviewer.json
 ```
 
-or point `PI_PERMISSION_REVIEWER_CONFIG` at another trusted user-level file.
+You can also edit it directly, copy an example, or point
+`PI_PERMISSION_REVIEWER_CONFIG` at another trusted user-level file.
 Invalid configuration disables automatic approval and routes reviewable actions
 to the human rather than silently weakening policy.
 If the underlying permission-engine configuration cannot be parsed or
@@ -55,16 +86,10 @@ Runtime audit and generated sandbox files live under
 `~/.pi/agent/permission-reviewer`. Set `PI_PERMISSION_REVIEWER_RUNTIME_DIR` to
 override that machine-local location.
 
-```json
-{
-  "reviewers": [
-    { "level": 0, "model": "openai-codex/gpt-5.6-luna" },
-    { "level": 0, "model": "another-provider/fast-fallback" },
-    { "level": 1, "model": "openai-codex/gpt-5.6-terra" },
-    { "level": 2, "model": "another-provider/expert" }
-  ]
-}
-```
+Every model is identified by Pi's own `provider/model` identity. Built-in
+providers, custom `models.json` providers, and extension-registered providers
+are treated alike. A manually entered model may be unavailable now and become
+usable later after its provider is authenticated.
 
 Semantics:
 
@@ -78,6 +103,27 @@ Semantics:
   strictly higher level.
 - `human` or exhaustion reaches a human when interactive UI exists; headless
   operation fails closed.
+
+`level` expresses permission-review capability, not a provider or benchmark
+rank. Level 0 should handle routine decisions cheaply; level 1 should be the
+first reviewer trusted with complex shell semantics; higher levels are optional
+before human fallback. The user decides which models meet those roles.
+
+## Examples
+
+- [`examples/openai-codex.json`](examples/openai-codex.json) uses Luna for
+  routine checks and Terra for complex ones.
+- [`examples/mixed-providers.json`](examples/mixed-providers.json) shows a
+  low-cost provider at level 0, a different provider at level 1, and an
+  optional stronger level 2.
+- [`examples/same-level-fallbacks.json`](examples/same-level-fallbacks.json)
+  shows provider failover without invoking two models at the same level.
+
+Names outside Pi's built-in catalogue are illustrative. Replace them with the
+exact identifiers shown by `/permission-reviewer models` after configuring the
+provider in Pi. For example, a custom Ollama-compatible endpoint can be added
+through Pi's `~/.pi/agent/models.json`, then selected exactly like a native
+provider model.
 
 Reviewers have no tools. They receive an immutable evidence packet containing
 the tool input, working directory, classifier reason, policy, and latest direct

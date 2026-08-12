@@ -23,6 +23,7 @@
   "files": [
     "extensions",
     "src",
+    "examples",
     "config.example.json",
     "README.md",
     "LICENSE",

@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyBash } from "../src/classifier.ts";
+import { handleConfigCommand } from "../src/config-ui.ts";
 import { loadConfig } from "../src/config.ts";
 import { lockToolInput } from "../src/input-lock.ts";
 import { runReviewLevels } from "../src/levels.ts";
@@ -28,7 +29,8 @@ interface PiPermExtension {
 }
 
 export default async function permissionReviewer(pi: ExtensionAPI) {
-  const loaded = loadConfig();
+  let loaded = loadConfig();
+  let configGeneration = 0;
   const piPermRoot = dirname(fileURLToPath(import.meta.resolve("pi-perm/package.json")));
   // pi-perm publishes TypeScript without strict-consumer declarations. Resolve it
   // dynamically so its runtime API remains isolated behind our local contract.
@@ -75,7 +77,9 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     for (const warning of loaded.warnings) ctx.ui.notify(warning, "warning");
     ctx.ui.notify(
-      `pi-permission-reviewer loaded with ${new Set(loaded.config.reviewers.map(({ level }) => level)).size} review level(s)`,
+      loaded.config.reviewers.length > 0
+        ? `pi-permission-reviewer loaded with ${new Set(loaded.config.reviewers.map(({ level }) => level)).size} review level(s)`
+        : "pi-permission-reviewer loaded in human-only mode; run /permission-reviewer configure",
       "info",
     );
   });
@@ -126,7 +130,9 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     if (classification.action === "human") {
       return humanReview(event, request, ctx);
     }
-    if (!loaded.valid) {
+    const reviewConfig = loaded;
+    const reviewGeneration = configGeneration;
+    if (!reviewConfig.valid) {
       return humanReview(
         event,
         request,
@@ -135,17 +141,25 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       );
     }
     const reviewed = await runReviewLevels({
-      reviewers: loaded.config.reviewers,
+      reviewers: reviewConfig.config.reviewers,
       minimumLevel: request.minimumLevel,
       invoke: (invocation) =>
         invokeModelReviewer(
           ctx.modelRegistry,
           invocation,
           request,
-          loaded.config.policy,
+          reviewConfig.config.policy,
           ctx.signal,
         ),
     });
+    if (configGeneration !== reviewGeneration) {
+      return humanReview(
+        event,
+        request,
+        ctx,
+        "Reviewer configuration changed while this action was under review",
+      );
+    }
     if (reviewed.decision === "allow") {
       return lockAllowedInput(event, "Approved");
     }
@@ -156,21 +170,22 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("permission-reviewer", {
-    description: "Show the effective tiered reviewer configuration",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify(
-        JSON.stringify(
-          {
-            configSource: loaded.source ?? "built-in defaults",
-            reviewers: loaded.config.reviewers,
-            terminalFallback: "human",
-          },
-          null,
-          2,
-        ),
-        "info",
-      );
+    description: "Inspect or configure the tiered permission reviewer",
+    getArgumentCompletions: (prefix) => {
+      const commands = ["status", "configure", "models", "reload"];
+      const matches = commands.filter((command) => command.startsWith(prefix));
+      return matches.length > 0
+        ? matches.map((command) => ({ value: command, label: command }))
+        : null;
     },
+    handler: async (args, ctx) =>
+      handleConfigCommand(args, ctx, {
+        getLoaded: () => loaded,
+        setLoaded: (next) => {
+          loaded = next;
+          configGeneration += 1;
+        },
+      }),
   });
 }
 

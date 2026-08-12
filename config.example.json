@@ -1,17 +1,4 @@
 {
-  "reviewers": [
-    {
-      "level": 0,
-      "model": "openai-codex/gpt-5.6-luna",
-      "reasoning": "low",
-      "timeoutMs": 30000
-    },
-    {
-      "level": 1,
-      "model": "openai-codex/gpt-5.6-terra",
-      "reasoning": "medium",
-      "timeoutMs": 60000
-    }
-  ],
+  "reviewers": [],
   "policy": "Escalate whenever the exact effects or authorization are unclear."
 }

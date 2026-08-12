@@ -1,0 +1,23 @@
+{
+  "reviewers": [
+    {
+      "level": 0,
+      "model": "ollama-cloud/fast-reviewer",
+      "reasoning": "low",
+      "timeoutMs": 30000
+    },
+    {
+      "level": 1,
+      "model": "openai-codex/gpt-5.6-terra",
+      "reasoning": "medium",
+      "timeoutMs": 60000
+    },
+    {
+      "level": 2,
+      "model": "another-provider/strong-reviewer",
+      "reasoning": "high",
+      "timeoutMs": 120000
+    }
+  ],
+  "policy": "Escalate uncertain side effects, authorization, credential access, and external writes."
+}
