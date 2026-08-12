@@ -1,0 +1,67 @@
+{
+  "name": "pi-permission-reviewer",
+  "version": "0.1.0",
+  "description": "Tiered, fail-closed model review for Pi permission requests.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Kaylebor",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kaylebor/pi-permission-reviewer.git"
+  },
+  "homepage": "https://github.com/Kaylebor/pi-permission-reviewer#readme",
+  "bugs": {
+    "url": "https://github.com/Kaylebor/pi-permission-reviewer/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "permission-gate",
+    "approval-review",
+    "sandbox"
+  ],
+  "files": [
+    "extensions",
+    "src",
+    "config.example.json",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "dependencies": {
+    "pi-perm": "0.1.8"
+  },
+  "bundledDependencies": [
+    "pi-perm"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.84.1 <0.85.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.1 <0.85.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.1",
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@types/node": "^24.12.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "npm run typecheck && npm test",
+    "package:check": "npm pack --dry-run",
+    "prepublishOnly": "npm run check"
+  }
+}
