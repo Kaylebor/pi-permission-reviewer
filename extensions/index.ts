@@ -12,11 +12,23 @@ import { handleConfigCommand } from "../src/config-ui.ts";
 import { loadConfig } from "../src/config.ts";
 import { lockToolInput } from "../src/input-lock.ts";
 import { runReviewLevels } from "../src/levels.ts";
-import { invokeModelReviewer } from "../src/reviewer.ts";
-import type { ReviewRequest } from "../src/types.ts";
+import {
+  hardenSandboxSettings,
+  isPublicNetworkDestination,
+  runReactiveSandbox,
+} from "../src/reactive-sandbox.ts";
+import {
+  invokeModelReviewer,
+  invokeNetworkReviewer,
+} from "../src/reviewer.ts";
+import type {
+  ReviewAssessment,
+  ReviewerConfig,
+  ReviewRequest,
+} from "../src/types.ts";
 
 interface PiPermExtension {
-  state: { cwd: string };
+  state: { cwd: string; config: unknown; activeProfile: string };
   handleToolCall(event: ToolCallEvent, ctx: ExtensionContext): Promise<
     | { block?: boolean; reason?: string; terminate?: boolean }
     | undefined
@@ -26,6 +38,16 @@ interface PiPermExtension {
     | undefined
     ? Hook
     : never;
+}
+
+interface ApprovedReview {
+  request: ReviewRequest;
+  configGeneration: number;
+  inputDigest: string;
+  cwd: string;
+  policy?: string;
+  reviewer?: ReviewerConfig;
+  assessment?: ReviewAssessment;
 }
 
 export default async function permissionReviewer(pi: ExtensionAPI) {
@@ -39,11 +61,22 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   )) as {
     createPiPermExtension(options: Record<string, unknown>): PiPermExtension;
   };
+  const { getActiveProfile } = (await import(
+    "pi-perm/" + "core/config.ts"
+  )) as { getActiveProfile(state: unknown): unknown };
+  const { toSrtSettings } = (await import(
+    "pi-perm/" + "core/srt.ts"
+  )) as {
+    toSrtSettings(profile: unknown): Record<string, unknown>;
+  };
   let permissions: PiPermExtension;
   try {
     permissions = piPermModule.createPiPermExtension({
       cwd: process.cwd(),
       events: pi.events,
+      // Bash execution uses the bundled SRT library worker below, not pi-perm's
+      // external `srt` CLI spawn hook.
+      commandExists: () => true,
       extensionRoot: piPermRoot,
       runtimeBaseDir:
         process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR ??
@@ -61,12 +94,74 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   }
   const createBashToolDefinition = PiAgent.createBashToolDefinition;
   let latestDirectUserInput: string | undefined;
+  const approvedReviews = new Map<string, ApprovedReview>();
+  let activeSandboxWorkers = 0;
+  const rememberApproval = (
+    toolCallId: string,
+    approval: Omit<ApprovedReview, "configGeneration">,
+  ) => {
+    if (approvedReviews.has(toolCallId)) return false;
+    approvedReviews.set(toolCallId, { ...approval, configGeneration });
+    setTimeout(() => approvedReviews.delete(toolCallId), 5 * 60_000).unref();
+    return true;
+  };
 
-  pi.registerTool(
-    createBashToolDefinition(permissions.state.cwd, {
-      spawnHook: permissions.createBashSpawnHook(),
-    }),
-  );
+  const bashTool = createBashToolDefinition(permissions.state.cwd);
+  pi.registerTool({
+    ...bashTool,
+    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+      if (activeSandboxWorkers >= 4) {
+        throw new Error("reactive sandbox worker limit reached");
+      }
+      const approved = approvedReviews.get(toolCallId);
+      approvedReviews.delete(toolCallId);
+      if (
+        approved &&
+        (approved.inputDigest !== JSON.stringify(params) ||
+          approved.cwd !== ctx.cwd ||
+          approved.configGeneration !== configGeneration)
+      ) {
+        throw new Error("permission approval no longer matches this bash invocation");
+      }
+      const invocationTool = createBashToolDefinition(permissions.state.cwd, {
+        operations: {
+          exec: (command, cwd, options) =>
+            runReactiveSandbox({
+              toolCallId,
+              command,
+              cwd,
+              settings: hardenSandboxSettings(
+                toSrtSettings(getActiveProfile(permissions.state)),
+              ),
+              onData: options.onData,
+              onNetworkRequest: (destination, reviewSignal) =>
+                reviewNetworkRequest(
+                  approved,
+                  destination,
+                  ctx,
+                  reviewSignal,
+                  configGeneration,
+                ),
+              ...(options.signal ? { signal: options.signal } : {}),
+              ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
+            }),
+        },
+      });
+      activeSandboxWorkers += 1;
+      try {
+        return await invocationTool.execute(
+          toolCallId,
+          params,
+          signal,
+          onUpdate,
+          ctx,
+        );
+      } finally {
+        approvedReviews.delete(toolCallId);
+        activeSandboxWorkers -= 1;
+      }
+    },
+  });
 
   pi.on("input", (event) => {
     if (event.source === "interactive" || event.source === "rpc") {
@@ -128,7 +223,14 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     };
 
     if (classification.action === "human") {
-      return humanReview(event, request, ctx);
+      return humanReview(event, request, ctx, undefined, () => {
+        rememberApproval(event.toolCallId, {
+          request,
+          inputDigest: JSON.stringify(event.input),
+          cwd: ctx.cwd,
+          policy: loaded.config.policy,
+        });
+      });
     }
     const reviewConfig = loaded;
     const reviewGeneration = configGeneration;
@@ -138,6 +240,12 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         request,
         ctx,
         "Reviewer configuration is invalid; automatic approval is disabled",
+        () =>
+          rememberApproval(event.toolCallId, {
+            request,
+            inputDigest: JSON.stringify(event.input),
+            cwd: ctx.cwd,
+          }),
       );
     }
     const reviewed = await runReviewLevels({
@@ -158,15 +266,51 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         request,
         ctx,
         "Reviewer configuration changed while this action was under review",
+        () =>
+          rememberApproval(event.toolCallId, {
+            request,
+            inputDigest: JSON.stringify(event.input),
+            cwd: ctx.cwd,
+          }),
       );
     }
     if (reviewed.decision === "allow") {
-      return lockAllowedInput(event, "Approved");
+      const decided = [...reviewed.attempts]
+        .reverse()
+        .find(
+          (attempt) =>
+            attempt.status === "decided" &&
+            attempt.assessment?.decision === "allow",
+      );
+      const reviewer = decided
+        ? reviewConfig.config.reviewers.find(
+            (candidate) =>
+              candidate.level === decided.level && candidate.model === decided.model,
+          )
+        : undefined;
+      const locked = lockAllowedInput(event, "Approved");
+      if (locked) return locked;
+      rememberApproval(event.toolCallId, {
+        request,
+        inputDigest: JSON.stringify(event.input),
+        cwd: ctx.cwd,
+        policy: reviewConfig.config.policy,
+        ...(reviewer ? { reviewer } : {}),
+        ...(decided?.assessment ? { assessment: decided.assessment } : {}),
+      });
+      return;
     }
     if (reviewed.decision === "deny") {
       return { block: true, reason: reviewed.reason, terminate: true };
     }
-    return humanReview(event, request, ctx, reviewed.reason);
+    return humanReview(event, request, ctx, reviewed.reason, () => {
+      rememberApproval(event.toolCallId, {
+        request,
+        inputDigest: JSON.stringify(event.input),
+        cwd: ctx.cwd,
+        policy: reviewConfig.config.policy,
+      });
+    });
   });
 
   pi.registerCommand("permission-reviewer", {
@@ -194,6 +338,7 @@ async function humanReview(
   request: ReviewRequest,
   ctx: ExtensionContext,
   reason = request.policyReason ?? "model review requires human judgment",
+  onAllow?: () => void,
 ) {
   if (!ctx.hasUI) {
     return { block: true, reason: `Human approval required: ${reason}` };
@@ -203,7 +348,55 @@ async function humanReview(
     `${reason}\n\nExact ${request.tool} input:\n${formatHumanInput(request.input)}\n\nAllow once?`,
   );
   if (!allowed) return { block: true, reason: "Denied by user", terminate: true };
-  return lockAllowedInput(event, "Approved");
+  const locked = lockAllowedInput(event, "Approved");
+  if (locked) return locked;
+  onAllow?.();
+  return;
+}
+
+async function reviewNetworkRequest(
+  approved: ApprovedReview | undefined,
+  destination: { host: string; port?: number },
+  ctx: ExtensionContext,
+  signal: AbortSignal | undefined,
+  currentConfigGeneration: number,
+): Promise<boolean> {
+  if (!approved || signal?.aborted) return false;
+  if (!isEligibleReactiveDestination(destination)) return false;
+  let reason = "The approved process requested an off-list network destination";
+  if (approved.configGeneration !== currentConfigGeneration) {
+    reason = "Reviewer configuration changed after the command was approved";
+  } else if (approved.reviewer && approved.assessment) {
+    const result = await invokeNetworkReviewer(
+      ctx.modelRegistry,
+      approved.reviewer,
+      approved.request,
+      approved.assessment,
+      destination,
+      approved.policy,
+      signal,
+    );
+    if (result.kind === "assessment") {
+      if (result.assessment.decision === "allow") return true;
+      if (result.assessment.decision === "deny") return false;
+      reason = result.assessment.reason;
+    } else {
+      reason = result.error;
+    }
+  }
+  if (!ctx.hasUI || signal?.aborted) return false;
+  return ctx.ui.confirm(
+    "Network permission",
+    `${reason}\n\nCommand:\n${String(approved.request.input.command ?? "")}\n\nDestination: ${destination.host}:${destination.port ?? "unknown port"}\n\nAllow this destination for this command?`,
+    signal ? { signal } : undefined,
+  );
+}
+
+export function isEligibleReactiveDestination(destination: {
+  host: string;
+  port?: number;
+}): boolean {
+  return destination.port === 443 && isPublicNetworkDestination(destination);
 }
 
 function formatHumanInput(input: Record<string, unknown>): string {

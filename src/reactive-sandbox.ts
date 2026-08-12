@@ -1,0 +1,415 @@
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
+import { fileURLToPath } from "node:url";
+
+export interface NetworkRequest {
+  host: string;
+  port?: number;
+}
+
+interface WorkerMessage {
+  type: "started" | "output" | "network-request" | "result" | "error";
+  toolCallId?: string;
+  requestId?: string;
+  host?: string;
+  port?: number;
+  data?: string;
+  exitCode?: number | null;
+  error?: string;
+  childPid?: number;
+  invocationNonce?: string;
+}
+
+export async function runReactiveSandbox(options: {
+  toolCallId: string;
+  command: string;
+  cwd: string;
+  settings: Record<string, unknown>;
+  onData(data: Buffer): void;
+  onNetworkRequest(request: NetworkRequest, signal: AbortSignal): Promise<boolean>;
+  signal?: AbortSignal;
+  timeout?: number;
+  workerPath?: string;
+  nodeBinary?: string;
+  networkRequestLimit?: number;
+  networkReviewTimeoutMs?: number;
+}): Promise<{ exitCode: number | null }> {
+  if (options.signal?.aborted) throw new Error("aborted");
+  const worker = spawn(
+    options.nodeBinary ?? process.env.PI_PERMISSION_REVIEWER_NODE ?? "node",
+    [options.workerPath ?? fileURLToPath(new URL("./sandbox-worker.mjs", import.meta.url))],
+    {
+      cwd: options.cwd,
+      detached: process.platform !== "win32",
+      env: sanitizedEnvironment(process.env),
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+      windowsHide: true,
+    },
+  );
+  const decisions = new Map<string, Promise<boolean>>();
+  let decisionQueue = Promise.resolve();
+  const invocationNonce = randomUUID();
+  const reviewLifecycle = new AbortController();
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let sandboxChildPid: number | undefined;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const settle = (error?: Error, result?: { exitCode: number | null }) => {
+      if (settled) return;
+      settled = true;
+      reviewLifecycle.abort(new Error("sandbox invocation settled"));
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      options.signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve(result ?? { exitCode: null });
+    };
+    const terminateWorker = () => {
+      signalProcessGroup(sandboxChildPid, "SIGKILL");
+      signalProcessGroup(worker.pid, "SIGKILL");
+    };
+    const sendWorker = (message: Record<string, unknown>) => {
+      if (!worker.connected) return;
+      worker.send(message, (error) => {
+        if (error && !settled && !options.signal?.aborted) settle(error);
+      });
+    };
+    const onAbort = () => {
+      reviewLifecycle.abort(options.signal?.reason ?? new Error("aborted"));
+      sendWorker({ type: "abort", invocationNonce });
+      forceKillTimer = setTimeout(terminateWorker, 1_000);
+      forceKillTimer.unref();
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    worker.stderr?.on("data", (data) => options.onData(Buffer.from(data)));
+    worker.on("error", (error) => settle(error));
+    worker.on("exit", (code, signal) => {
+      if (!settled) {
+        settle(
+          new Error(
+            options.signal?.aborted
+              ? "aborted"
+              : `sandbox worker exited before completion (${signal ?? code ?? "unknown"})`,
+          ),
+        );
+      }
+    });
+    worker.on("message", (raw) => {
+      const message = raw as WorkerMessage;
+      if (message.invocationNonce !== invocationNonce) {
+        settle(new Error("sandbox worker IPC authentication failed"));
+        terminateWorker();
+        return;
+      }
+      if (message.type === "started") {
+        if (
+          message.toolCallId === options.toolCallId &&
+          Number.isSafeInteger(message.childPid) &&
+          Number(message.childPid) > 1
+        ) {
+          sandboxChildPid = message.childPid;
+        }
+        return;
+      }
+      if (message.type === "output" && typeof message.data === "string") {
+        options.onData(Buffer.from(message.data, "base64"));
+        return;
+      }
+      if (message.type === "network-request") {
+        if (
+          message.toolCallId !== options.toolCallId ||
+          typeof message.requestId !== "string" ||
+          typeof message.host !== "string" ||
+          !validHost(message.host) ||
+          (message.port !== undefined && !validPort(message.port))
+        ) {
+          if (typeof message.requestId === "string") {
+            sendWorker({
+              type: "network-response",
+              invocationNonce,
+              requestId: message.requestId,
+              allow: false,
+            });
+          }
+          return;
+        }
+        const canonical = canonicalizeNetworkDestination({
+          host: message.host,
+          ...(message.port !== undefined ? { port: message.port } : {}),
+        });
+        if (!canonical) {
+          sendWorker({
+            type: "network-response",
+            invocationNonce,
+            requestId: message.requestId,
+            allow: false,
+          });
+          return;
+        }
+        const key = `${canonical.host}:${canonical.port ?? "*"}`;
+        let decision = decisions.get(key);
+        if (!decision) {
+          if (decisions.size >= (options.networkRequestLimit ?? 8)) {
+            sendWorker({
+              type: "network-response",
+              invocationNonce,
+              requestId: message.requestId,
+              allow: false,
+            });
+            return;
+          } else {
+            const reviewController = new AbortController();
+            const reviewSignal = AbortSignal.any([
+              reviewLifecycle.signal,
+              reviewController.signal,
+            ]);
+            decision = decisionQueue.then(async () => {
+              if (reviewSignal.aborted || settled) return false;
+              const timeout = setTimeout(
+                () => reviewController.abort(new Error("network review timed out")),
+                options.networkReviewTimeoutMs ?? 30_000,
+              );
+              timeout.unref();
+              try {
+                return await options.onNetworkRequest(canonical, reviewSignal);
+              } catch {
+                return false;
+              } finally {
+                clearTimeout(timeout);
+              }
+            });
+            decisionQueue = decision.then(
+              () => undefined,
+              () => undefined,
+            );
+          }
+          decisions.set(key, decision);
+        }
+        void decision
+          .then((allow) => {
+            if (!settled && !reviewLifecycle.signal.aborted) {
+              sendWorker({
+                type: "network-response",
+                invocationNonce,
+                requestId: message.requestId,
+                allow,
+              });
+            }
+          })
+          .catch(() => {
+            if (!settled && !reviewLifecycle.signal.aborted) {
+              sendWorker({
+                type: "network-response",
+                invocationNonce,
+                requestId: message.requestId,
+                allow: false,
+              });
+            }
+          });
+        return;
+      }
+      if (message.type === "result") {
+        settle(undefined, { exitCode: message.exitCode ?? null });
+        return;
+      }
+      if (message.type === "error") settle(new Error(message.error ?? "sandbox worker failed"));
+    });
+    sendWorker({
+      type: "start",
+      invocationNonce,
+      toolCallId: options.toolCallId,
+      command: options.command,
+      cwd: options.cwd,
+      settings: options.settings,
+      ...(options.timeout !== undefined
+        ? { timeoutMs: Math.min(options.timeout * 1_000, 2_147_483_647) }
+        : {}),
+    });
+  });
+}
+
+export function hardenSandboxSettings(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const filesystem = isRecord(value.filesystem) ? value.filesystem : {};
+  const denyRead = Array.isArray(filesystem.denyRead)
+    ? filesystem.denyRead.filter((item): item is string => typeof item === "string")
+    : [];
+  return {
+    ...value,
+    filesystem: {
+      ...filesystem,
+      denyRead: [
+        ...new Set([
+          ...denyRead,
+          "~/.ssh",
+          "~/.aws",
+          "~/.azure",
+          "~/.config/gcloud",
+          "~/.docker",
+          "~/.kube",
+          "~/.netrc",
+          "~/.npmrc",
+          "~/.git-credentials",
+          "~/.pi/agent/auth.json",
+          "~/.codex/auth.json",
+          "~/Library/Keychains",
+        ]),
+      ],
+    },
+  };
+}
+
+export function sanitizedEnvironment(
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const allowed = new Set([
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "PATH",
+    "PI_MODEL",
+    "PI_PROVIDER",
+    "PI_REASONING_LEVEL",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "USER",
+  ]);
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([key, value]) =>
+        value !== undefined &&
+        (allowed.has(key) || key.startsWith("LC_")),
+    ),
+  );
+}
+
+export function canonicalizeNetworkDestination(
+  destination: NetworkRequest,
+): NetworkRequest | undefined {
+  if (destination.port !== undefined && !validPort(destination.port)) return;
+  const raw = destination.host;
+  if (!validHost(raw)) return;
+  const bracketed = raw.startsWith("[") && raw.endsWith("]");
+  const authority = raw.includes(":") && !bracketed ? `[${raw}]` : raw;
+  try {
+    const url = new URL(`https://${authority}/`);
+    if (
+      url.username ||
+      url.password ||
+      url.port ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash
+    )
+      return;
+    let host = url.hostname.toLowerCase();
+    if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+    host = host.replace(/\.$/, "");
+    if (!host || host.length > 253) return;
+    return { host, ...(destination.port !== undefined ? { port: destination.port } : {}) };
+  } catch {
+    return;
+  }
+}
+
+export function isPublicNetworkDestination(destination: NetworkRequest): boolean {
+  const canonical = canonicalizeNetworkDestination(destination);
+  if (!canonical) return false;
+  const host = canonical.host;
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host === "metadata.google.internal"
+  )
+    return false;
+  if (isIP(host) === 4) return isGlobalIpv4(host);
+  if (isIP(host) === 6) return isGlobalIpv6(host);
+  return (
+    host.includes(".") &&
+    host.split(".").every((label) =>
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label),
+    )
+  );
+}
+
+function signalProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (!pid) return;
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, signal);
+  } catch {}
+}
+
+function validHost(host: string): boolean {
+  return host.length > 0 && host.length <= 253 && !/[\s\0-\x1f\x7f]/.test(host);
+}
+
+function isGlobalIpv4(host: string): boolean {
+  const [a, b, c] = host.split(".").map(Number);
+  return !(
+    a === 0 ||
+    a === 10 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 192 && b === 0 && c === 2) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
+    a >= 224
+  );
+}
+
+function isGlobalIpv6(host: string): boolean {
+  const bytes = ipv6Bytes(host);
+  if (!bytes) return false;
+  const mapped = bytes.slice(0, 10).every((value) => value === 0) &&
+    bytes[10] === 0xff && bytes[11] === 0xff;
+  if (mapped) {
+    return isGlobalIpv4(`${bytes[12]}.${bytes[13]}.${bytes[14]}.${bytes[15]}`);
+  }
+  // Restrict literal approval to the IPv6 global-unicast block and exclude
+  // the documentation prefix. DNS names remain eligible and resolve inside SRT.
+  return (
+    (bytes[0] & 0xe0) === 0x20 &&
+    !(bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0x0d && bytes[3] === 0xb8)
+  );
+}
+
+function ipv6Bytes(host: string): number[] | undefined {
+  const halves = host.split("::");
+  if (halves.length > 2) return;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const parse = (part: string) => {
+    if (!/^[0-9a-f]{1,4}$/i.test(part)) return;
+    return Number.parseInt(part, 16);
+  };
+  const leftValues = left.map(parse);
+  const rightValues = right.map(parse);
+  if (leftValues.some((value) => value === undefined) || rightValues.some((value) => value === undefined)) return;
+  const missing = 8 - leftValues.length - rightValues.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return;
+  const words = [
+    ...(leftValues as number[]),
+    ...Array.from({ length: missing }, () => 0),
+    ...(rightValues as number[]),
+  ];
+  return words.flatMap((word) => [word >> 8, word & 0xff]);
+}
+
+function validPort(port: number): boolean {
+  return Number.isSafeInteger(port) && port >= 1 && port <= 65_535;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

@@ -2,10 +2,10 @@
 
 A portable, fail-closed Pi permission gate with ordered model-review levels.
 
-The extension combines `pi-perm`'s cross-platform policy and Sandbox Runtime
-integration with an isolated, tool-less reviewer chain. It does not load the
-`pi-perm` extension separately; it imports the underlying engine so there is one
-`tool_call` gate and one bash wrapper.
+The extension combines `pi-perm`'s cross-platform policy with a per-invocation
+Sandbox Runtime worker and an isolated, tool-less reviewer chain. It does not
+load the `pi-perm` extension separately; it imports the underlying engine so
+there is one `tool_call` gate and one bash execution boundary.
 
 > [!IMPORTANT]
 > Pi extensions run with the permissions of the Pi process. Model review is
@@ -17,7 +17,8 @@ integration with an isolated, tool-less reviewer chain. It does not load the
 Early development release. The review-level engine, conservative bash router,
 fail-closed model invocation, exact-input locking, and `pi-perm` composition are
 implemented. Configuration and adversarial coverage will evolve before an npm
-release.
+release. The current reactive worker has been exercised on macOS; Linux runtime
+validation is still pending and Windows is not currently a supported target.
 
 Tiered model review currently applies to agent-issued `bash` calls. File tools
 remain under `pi-perm`'s deterministic boundary and human confirmation flow;
@@ -30,11 +31,10 @@ covered by the reviewer chain.
 pi install git:github.com/Kaylebor/pi-permission-reviewer
 ```
 
-Install Anthropic Sandbox Runtime separately so `pi-perm` can wrap bash:
-
-```sh
-npm install -g @anthropic-ai/sandbox-runtime
-```
+Anthropic Sandbox Runtime is installed as a package dependency. A separate
+global `srt` command is not required. The reactive worker requires `node` on
+`PATH` even when Pi itself is a Bun executable; set `PI_PERMISSION_REVIEWER_NODE`
+to an explicit Node binary when needed.
 
 ## Configure inside Pi
 
@@ -148,10 +148,45 @@ egress on the assumption that command classification is complete.
 Deterministic `pi-perm` blocks are terminal and cannot be overturned by a
 reviewer; only operations classified for confirmation enter the model chain.
 
+## Reactive network review
+
+An approved command remains inside Sandbox Runtime. If it attempts a connection
+outside the configured network allowlist, SRT pauses the original process before
+connecting and reports the concrete host and port. The extension then asks the
+same configured model reviewer once more using an immutable copy of the original
+request, its prior assessment, and the new destination. This is a fresh model
+completion with continuation context, not a provider-side chat session. If that
+reviewer cannot decide—or the command was approved by a human—the human receives
+a second, explicit destination prompt.
+
+Allowing the destination resumes the same process; the command is not rerun.
+The decision is bound to the exact Pi tool-call ID and cached only for that
+host-port pair for the lifetime of that command. Explicit SRT deny rules remain
+terminal and never reach the reviewer. Headless operation denies off-list
+connections. Reviews are serialized, limited to eight distinct destinations per
+command, and cancelled after 30 seconds or when the command ends. Reactive
+approval is currently limited to public-looking HTTPS destinations on port 443;
+loopback, local/private literal addresses, metadata
+hosts, and other ports fail closed. DNS rebinding cannot be ruled out from
+SRT's hostname-only callback, so host approval should not be treated as content-
+or credential-aware authorization.
+
+The worker receives a deliberately reduced environment and adds OS-level read
+denials for common SSH, cloud, container, package-manager, Git credential, Pi,
+Codex, and macOS Keychain paths. These are defense-in-depth controls, not a
+complete secret detector.
+
+This first reactive bridge covers network destinations. Reactive filesystem,
+Unix-socket, and local-binding grants are not implemented yet. A curated and
+user-expandable catalogue of common host-port combinations is intentionally
+deferred until the reactive review path is established.
+
 ## Relationship to existing packages
 
 - [`pi-perm`](https://github.com/DCRcoder/pi-perm) supplies reusable permission
-  evaluation and cross-platform Sandbox Runtime wrapping.
+  evaluation and effective-profile translation. This extension replaces its
+  CLI spawn hook with a per-invocation Sandbox Runtime library worker so an
+  off-list connection can be reviewed without restarting the command.
 - [`pi-approval-guardian`](https://github.com/mics8128/pi-approval-guardian)
   informed the fail-closed reviewer and exact-input locking design. It is not a
   runtime dependency because loading two independent approval extensions would

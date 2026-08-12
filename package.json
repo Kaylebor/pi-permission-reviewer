@@ -42,6 +42,7 @@
     ]
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.71",
     "pi-perm": "0.1.8"
   },
   "bundledDependencies": [

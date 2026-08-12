@@ -1,5 +1,11 @@
 # Third-party notices
 
+## Anthropic Sandbox Runtime
+
+This product uses `@anthropic-ai/sandbox-runtime`, licensed under the Apache
+License 2.0. The complete license text is included in the bundled dependency at
+`node_modules/@anthropic-ai/sandbox-runtime/LICENSE`.
+
 ## pi-approval-guardian
 
 Portions of the exact tool-input locking implementation are adapted from

@@ -3,7 +3,42 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import permissionReviewer from "../extensions/index.ts";
+import permissionReviewer, {
+  isEligibleReactiveDestination,
+} from "../extensions/index.ts";
+
+test("reactive network review is limited to public-looking HTTPS", () => {
+  assert.equal(
+    isEligibleReactiveDestination({ host: "github.com", port: 443 }),
+    true,
+  );
+  for (const host of [
+    "localhost",
+    "127.0.0.1",
+    "127.1",
+    "2130706433",
+    "0x7f000001",
+    "0x7f.0.0.1",
+    "0177.0.0.1",
+    "2852039166",
+    "169.254.169.254",
+    "10.0.0.1",
+    "metadata.google.internal",
+    "service.local",
+    "::1",
+    "[::1]",
+    "::ffff:127.0.0.1",
+    "::ffff:7f00:1",
+    "192.0.2.1",
+    "2001:db8::1",
+  ]) {
+    assert.equal(isEligibleReactiveDestination({ host, port: 443 }), false);
+  }
+  assert.equal(
+    isEligibleReactiveDestination({ host: "github.com", port: 22 }),
+    false,
+  );
+});
 
 test("a deterministic pi-perm block cannot enter model review", async () => {
   const runtime = mkdtempSync(
