@@ -8,6 +8,10 @@ import permissionReviewer, {
   resolveReactiveReasoning,
 } from "../extensions/index.ts";
 
+function builtinTool(name: string) {
+  return [{ name, sourceInfo: { source: "builtin" } }];
+}
+
 test("reactive continuation lowers only above the configured floor", () => {
   const config = { reasoning: "one-lower" as const, floor: "low" as const };
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "xhigh" }, config), "high");
@@ -62,6 +66,7 @@ test("a deterministic pi-perm block cannot enter model review", async () => {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   const pi = {
     events: { emit() {} },
+    getAllTools: () => builtinTool("read"),
     registerTool() {},
     registerCommand() {},
     on(name: string, handler: (...args: any[]) => unknown) {
@@ -120,6 +125,7 @@ test("a deterministic block cannot spoof the confirmation protocol", async () =>
   const handlers = new Map<string, (...args: any[]) => unknown>();
   const pi = {
     events: { emit() {} },
+    getAllTools: () => builtinTool("read"),
     registerTool() {},
     registerCommand() {},
     on(name: string, handler: (...args: any[]) => unknown) {
@@ -229,6 +235,7 @@ test("an allowed file tool is locked against later path mutation", async () => {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   const pi = {
     events: { emit() {} },
+    getAllTools: () => builtinTool("read"),
     registerTool() {},
     registerCommand() {},
     on(name: string, handler: (...args: any[]) => unknown) {
@@ -241,15 +248,338 @@ test("an allowed file tool is locked against later path mutation", async () => {
     toolCallId: "workspace-read",
     input: { path: "README.md" },
   };
+  let modelCalled = false;
+  let humanPrompted = false;
   const result = await handlers.get("tool_call")!(event, {
     cwd: process.cwd(),
     hasUI: true,
-    ui: { confirm: async () => true },
+    ui: {
+      confirm: async () => {
+        humanPrompted = true;
+        return true;
+      },
+    },
+    modelRegistry: {
+      find() {
+        modelCalled = true;
+      },
+    },
   });
   assert.equal(result, undefined);
+  assert.equal(modelCalled, false);
+  assert.equal(humanPrompted, false);
   assert.throws(() => {
     event.input.path = "~/.ssh/id_ed25519";
   }, TypeError);
+});
+
+test("a pi-perm file confirmation is reviewed at the file tool's minimum level", async () => {
+  const runtime = mkdtempSync(
+    join(tmpdir(), "pi-permission-reviewer-runtime-"),
+  );
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const reviewerConfig = join(runtime, "reviewers.json");
+  writeFileSync(
+    reviewerConfig,
+    JSON.stringify({
+      reviewers: [
+        { level: 0, model: "test/read-reviewer" },
+        { level: 1, model: "test/write-reviewer" },
+      ],
+    }),
+  );
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  let effectiveFileTool = "read";
+  const pi = {
+    events: { emit() {} },
+    getAllTools: () => builtinTool(effectiveFileTool),
+    registerTool() {},
+    registerCommand() {},
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  };
+  await permissionReviewer(pi as any);
+  const reviewed: Array<{ model: string; request: Record<string, unknown> }> = [];
+  const registry = {
+    find(provider: string, id: string) {
+      return { provider, id };
+    },
+    hasConfiguredAuth: () => true,
+    complete: async (model: { id: string }, request: { messages: Array<{ content: string }> }) => {
+      reviewed.push({
+        model: model.id,
+        request: JSON.parse(request.messages.at(-1)!.content).request,
+      });
+      return {
+        stopReason: "stop",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ decision: "allow", reason: "bounded file operation" }),
+          },
+        ],
+      };
+    },
+  };
+
+  for (const [toolName, input, expectedModel, expectedLevel] of [
+    ["read", { path: "/review-target" }, "read-reviewer", 0],
+    ["write", { path: "/review-target", content: "x" }, "write-reviewer", 1],
+    ["edit", { path: "/review-target", oldText: "x", newText: "y" }, "write-reviewer", 1],
+  ] as const) {
+    effectiveFileTool = toolName;
+    const event: {
+      toolName: string;
+      toolCallId: string;
+      input: Record<string, unknown>;
+    } = { toolName, toolCallId: `review-${toolName}`, input: { ...input } };
+    const result = await handlers.get("tool_call")!(event, {
+      cwd: process.cwd(),
+      hasUI: false,
+      ui: {},
+      modelRegistry: registry,
+    });
+    assert.equal(result, undefined);
+    assert.throws(() => {
+      event.input.path = "/different-target";
+    }, TypeError);
+    const invocation = reviewed.at(-1)!;
+    assert.equal(invocation.model, expectedModel);
+    assert.equal(invocation.request.tool, toolName);
+    assert.equal(invocation.request.minimumLevel, expectedLevel);
+  }
+});
+
+test("headless file review exhaustion fails closed", async () => {
+  const runtime = mkdtempSync(
+    join(tmpdir(), "pi-permission-reviewer-runtime-"),
+  );
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const reviewerConfig = join(runtime, "reviewers.json");
+  writeFileSync(reviewerConfig, JSON.stringify({ reviewers: [] }));
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const pi = {
+    events: { emit() {} },
+    getAllTools: () => builtinTool("read"),
+    registerTool() {},
+    registerCommand() {},
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  };
+  await permissionReviewer(pi as any);
+  const result = await handlers.get("tool_call")!(
+    {
+      toolName: "read",
+      toolCallId: "unreviewable-file-read",
+      input: { path: "/review-target" },
+    },
+    {
+      cwd: process.cwd(),
+      hasUI: false,
+      ui: {},
+      modelRegistry: {},
+    },
+  );
+  assert.equal((result as { block?: boolean }).block, true);
+  assert.match(String((result as { reason?: string }).reason), /Human approval required/);
+});
+
+test("human file approval is invalidated by a session change", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const reviewerConfig = join(runtime, "reviewers.json");
+  writeFileSync(reviewerConfig, JSON.stringify({ reviewers: [] }));
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const pi = {
+    events: { emit() {} },
+    getAllTools: () => builtinTool("read"),
+    registerTool() {},
+    registerCommand() {},
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  };
+  await permissionReviewer(pi as any);
+  const result = await handlers.get("tool_call")!(
+    { toolName: "read", toolCallId: "stale-human-read", input: { path: "/review-target" } },
+    {
+      cwd: process.cwd(),
+      hasUI: true,
+      modelRegistry: {},
+      ui: {
+        async confirm() {
+          await handlers.get("session_start")!({}, { ui: { notify() {} } });
+          return true;
+        },
+      },
+    },
+  ) as { block?: boolean; reason?: string };
+  assert.equal(result.block, true);
+  assert.match(String(result.reason), /session changed|cancelled/i);
+});
+
+test("a deterministic pi-perm file block cannot enter model review", async () => {
+  const runtime = mkdtempSync(
+    join(tmpdir(), "pi-permission-reviewer-runtime-"),
+  );
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const pi = {
+    events: { emit() {} },
+    getAllTools: () => builtinTool("write"),
+    registerTool() {},
+    registerCommand() {},
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  };
+  await permissionReviewer(pi as any);
+  let modelCalled = false;
+  const result = await handlers.get("tool_call")!(
+    {
+      toolName: "write",
+      toolCallId: "blocked-file-operation",
+      input: { path: ".env", content: "API_KEY=not-a-real-secret" },
+    },
+    {
+      cwd: process.cwd(),
+      hasUI: false,
+      ui: {},
+      modelRegistry: {
+        find() {
+          modelCalled = true;
+        },
+      },
+    },
+  );
+  assert.equal(modelCalled, false);
+  assert.equal((result as { block?: boolean }).block, true);
+  assert.match(String((result as { reason?: string }).reason), /denied by permission profile/);
+});
+
+test("file review fails closed when the effective tool is not Pi's builtin", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const pi = {
+    events: { emit() {} },
+    getAllTools: () => [{ name: "read", sourceInfo: { source: "extension" } }],
+    registerTool() {},
+    registerCommand() {},
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  };
+  await permissionReviewer(pi as any);
+  let modelCalled = false;
+  const result = await handlers.get("tool_call")!(
+    { toolName: "read", toolCallId: "overridden-read", input: { path: "/review-target" } },
+    {
+      cwd: process.cwd(),
+      hasUI: false,
+      ui: {},
+      modelRegistry: { find() { modelCalled = true; } },
+    },
+  );
+  assert.equal(modelCalled, false);
+  assert.equal((result as { block?: boolean }).block, true);
+  assert.match(String((result as { reason?: string }).reason), /not the built-in executor/);
+});
+
+test("a session change invalidates a non-cooperative file reviewer", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const reviewerConfig = join(runtime, "reviewers.json");
+  writeFileSync(reviewerConfig, JSON.stringify({ reviewers: [{ level: 0, model: "test/reviewer" }] }));
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const pi = {
+    events: { emit() {} },
+    getAllTools: () => builtinTool("read"),
+    registerTool() {},
+    registerCommand() {},
+    on(name: string, handler: (...args: any[]) => unknown) { handlers.set(name, handler); },
+  };
+  await permissionReviewer(pi as any);
+  let started!: () => void;
+  const reviewStarted = new Promise<void>((resolve) => { started = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const pending = handlers.get("tool_call")!(
+    { toolName: "read", toolCallId: "stale-read", input: { path: "/review-target" } },
+    {
+      cwd: process.cwd(), hasUI: false, ui: {},
+      modelRegistry: {
+        find: () => ({ provider: "test", id: "reviewer" }),
+        hasConfiguredAuth: () => true,
+        complete: async () => {
+          started();
+          await released;
+          return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ decision: "allow", reason: "safe" }) }] };
+        },
+      },
+    },
+  ) as Promise<unknown>;
+  await reviewStarted;
+  await handlers.get("session_start")!({}, { ui: { notify() {} } });
+  release();
+  const result = await pending as { block?: boolean; reason?: string };
+  assert.equal(result.block, true);
+  assert.match(String(result.reason), /session changed|cancelled/i);
+});
+
+test("an error after intercepted file confirmation remains terminal", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const pi = {
+    events: { emit() {} },
+    getAllTools: () => builtinTool("read"),
+    registerTool() {}, registerCommand() {},
+    on(name: string, handler: (...args: any[]) => unknown) { handlers.set(name, handler); },
+  };
+  await permissionReviewer(pi as any);
+  let statusCalls = 0;
+  let modelCalled = false;
+  const result = await handlers.get("tool_call")!(
+    { toolName: "read", toolCallId: "post-confirm-error", input: { path: "/review-target" } },
+    {
+      cwd: process.cwd(), hasUI: true,
+      ui: {
+        setStatus() { statusCalls += 1; if (statusCalls > 1) throw new Error("restore failed"); },
+      },
+      modelRegistry: { find() { modelCalled = true; } },
+    },
+  );
+  assert.equal(modelCalled, false);
+  assert.equal((result as { block?: boolean }).block, true);
+  assert.match(String((result as { reason?: string }).reason), /restore failed/);
 });
 
 test("malformed pi-perm configuration installs a fail-closed gate", async () => {

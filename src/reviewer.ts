@@ -54,6 +54,7 @@ export async function invokeModelReviewer(
     continuation?: Record<string, unknown>;
     reasoning?: ThinkingLevel;
     caseId?: string;
+    validateBeforeCommit?: () => string | undefined;
   } = {},
 ): Promise<
   | { kind: "assessment"; assessment: ReviewAssessment }
@@ -86,7 +87,7 @@ export async function invokeModelReviewer(
       timestamp: Date.now(),
     };
     const messages = [...(options.transcript?.messages ?? []), userMessage];
-    const response = await registry.complete(
+    const completion = registry.complete(
       model,
       {
         systemPrompt: SYSTEM_PROMPT,
@@ -98,6 +99,14 @@ export async function invokeModelReviewer(
         maxTokens: 1_000,
       },
     );
+    const completed = await settleWithAbort(completion, combined);
+    if (completed.aborted) {
+      return {
+        kind: signal?.aborted ? "cancelled" : timeout.aborted ? "timeout" : "cancelled",
+        error: signal?.aborted ? "reviewer cancelled" : "reviewer timed out",
+      };
+    }
+    const response = completed.value;
     if (response.stopReason === "error" || response.stopReason === "aborted") {
       return {
         kind: signal?.aborted
@@ -113,6 +122,10 @@ export async function invokeModelReviewer(
       .join("\n");
     try {
       const assessment = parseAssessment(text);
+      const validationError = options.validateBeforeCommit?.();
+      if (validationError) {
+        return { kind: "cancelled", error: validationError };
+      }
       if (options.transcript) {
         options.transcript.messages.push(userMessage, {
           role: "assistant",
@@ -153,6 +166,30 @@ export async function invokeModelReviewer(
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+async function settleWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<{ aborted: true } | { aborted: false; value: T }> {
+  if (signal.aborted) return { aborted: true };
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve({ aborted: true });
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve({ aborted: false, value });
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 export async function invokeNetworkReviewer(

@@ -6,7 +6,11 @@ import type {
 import * as PiAgent from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { ApprovalStore, createReviewCase } from "../src/approval-store.ts";
+import {
+  ApprovalStore,
+  canonicalSha256,
+  createReviewCase,
+} from "../src/approval-store.ts";
 import { classifyBash } from "../src/classifier.ts";
 import { handleConfigCommand } from "../src/config-ui.ts";
 import {
@@ -198,10 +202,175 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "bash") {
+    if (event.toolName !== "bash" && !isReviewableFileTool(event.toolName)) {
       const permissionDecision = await permissions.handleToolCall(event, ctx);
       if (permissionDecision) return permissionDecision;
       return lockAllowedInput(event, "Permission-approved");
+    }
+    if (isReviewableFileTool(event.toolName)) {
+      const fileToolName = event.toolName;
+      const ownershipError = validateBuiltinFileToolOwnership(pi, fileToolName);
+      if (ownershipError) return terminalBlock(ownershipError);
+      const fileSessionEpoch = sessionEpoch;
+      const fileConfigGeneration = configGeneration;
+      let initialInputDigest: string;
+      try {
+        initialInputDigest = canonicalSha256(event.input);
+      } catch (error) {
+        return terminalBlock(
+          `File-tool input could not be snapshotted: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const inspected = await permissions.inspectToolCall(event, ctx);
+      const boundaryError = validateFileReviewBoundary({
+        event,
+        initialInputDigest,
+        expectedSessionEpoch: fileSessionEpoch,
+        expectedConfigGeneration: fileConfigGeneration,
+        currentSessionEpoch: sessionEpoch,
+        currentConfigGeneration: configGeneration,
+        signal: ctx.signal,
+        ownershipError: validateBuiltinFileToolOwnership(pi, fileToolName),
+      });
+      if (boundaryError) return terminalBlock(boundaryError);
+      if (inspected.kind === "block") {
+        return { ...inspected.decision, terminate: true };
+      }
+      if (inspected.kind === "allow") {
+        return lockAllowedInput(event, "Permission-approved");
+      }
+      const confirmationLock = lockAllowedInput(event, "Review-pending");
+      if (confirmationLock) return confirmationLock;
+
+      const request: ReviewRequest = {
+        tool: event.toolName,
+        input: event.input as Record<string, unknown>,
+        cwd: ctx.cwd,
+        minimumLevel: event.toolName === "read" ? 0 : 1,
+        policyReason: inspected.reason,
+      };
+      let reviewCase: ReviewCase;
+      try {
+        reviewCase = createReviewCase({
+          sessionEpoch,
+          configGeneration,
+          toolCallId: event.toolCallId,
+          tool: event.toolName,
+          input: event.input as Record<string, unknown>,
+          cwd: ctx.cwd,
+          minimumLevel: request.minimumLevel,
+          policyReason: request.policyReason,
+          ...(loaded.config.policy ? { policy: loaded.config.policy } : {}),
+          // File tools use Pi's built-in executors, not the SRT-backed bash
+          // executor. Retain a stable, empty execution snapshot for the
+          // immutable review-case schema without suggesting an SRT guarantee.
+          sandboxSettings: {},
+        });
+      } catch (error) {
+        return { block: true, reason: `Could not snapshot the permission boundary: ${error instanceof Error ? error.message : String(error)}`, terminate: true };
+      }
+      const reviewConfig = loaded;
+      const reviewGeneration = configGeneration;
+      const reviewSignal = ctx.signal
+        ? AbortSignal.any([ctx.signal, reviewerLifecycle.signal])
+        : reviewerLifecycle.signal;
+      const contextOptions = reviewConfig.config.reviewContext ?? DEFAULT_REVIEW_CONTEXT;
+      const evidence = contextLedger.buildEvidence(contextOptions);
+      if (!reviewConfig.valid) {
+        const result = await humanReview(
+          event,
+          request,
+          ctx,
+          "Reviewer configuration is invalid; automatic approval is disabled",
+          undefined,
+          () => validateFileReviewBoundary({
+            event,
+            initialInputDigest,
+            expectedSessionEpoch: fileSessionEpoch,
+            expectedConfigGeneration: fileConfigGeneration,
+            currentSessionEpoch: sessionEpoch,
+            currentConfigGeneration: configGeneration,
+            signal: reviewSignal,
+            ownershipError: validateBuiltinFileToolOwnership(pi, fileToolName),
+          }),
+        );
+        return result;
+      }
+      const reviewed = await runReviewLevels({
+        reviewers: reviewConfig.config.reviewers,
+        minimumLevel: request.minimumLevel,
+        invoke: (invocation) =>
+          invokeWithReviewerHistory({
+            caseId: reviewCase.id,
+            reviewer: invocation.reviewer,
+            persistence: contextOptions.persistence,
+            transcripts: reviewerTranscripts,
+            queues: reviewerQueues,
+            invoke: (transcript) => invokeModelReviewer(
+              ctx.modelRegistry,
+              invocation,
+              request,
+              reviewConfig.config.policy,
+              reviewSignal,
+              {
+                evidence,
+                transcript,
+                caseId: reviewCase.id,
+                validateBeforeCommit: () => validateFileReviewBoundary({
+                  event,
+                  initialInputDigest,
+                  expectedSessionEpoch: fileSessionEpoch,
+                  expectedConfigGeneration: reviewGeneration,
+                  currentSessionEpoch: sessionEpoch,
+                  currentConfigGeneration: configGeneration,
+                  signal: reviewSignal,
+                  ownershipError: validateBuiltinFileToolOwnership(pi, fileToolName),
+                }),
+              },
+            ),
+          }),
+      });
+      const postReviewError = validateFileReviewBoundary({
+        event,
+        initialInputDigest,
+        expectedSessionEpoch: fileSessionEpoch,
+        expectedConfigGeneration: reviewGeneration,
+        currentSessionEpoch: sessionEpoch,
+        currentConfigGeneration: configGeneration,
+        signal: reviewSignal,
+        ownershipError: validateBuiltinFileToolOwnership(pi, fileToolName),
+      });
+      if (postReviewError) {
+        deleteCaseTranscripts(reviewerTranscripts, reviewCase.id);
+        return terminalBlock(postReviewError);
+      }
+      if (reviewed.decision === "allow") {
+        deleteCaseTranscripts(reviewerTranscripts, reviewCase.id);
+        return lockAllowedInput(event, "Approved");
+      }
+      if (reviewed.decision === "deny") {
+        deleteCaseTranscripts(reviewerTranscripts, reviewCase.id);
+        return { block: true, reason: reviewed.reason, terminate: true };
+      }
+      const result = await humanReview(
+        event,
+        request,
+        ctx,
+        reviewed.reason,
+        undefined,
+        () => validateFileReviewBoundary({
+          event,
+          initialInputDigest,
+          expectedSessionEpoch: fileSessionEpoch,
+          expectedConfigGeneration: fileConfigGeneration,
+          currentSessionEpoch: sessionEpoch,
+          currentConfigGeneration: configGeneration,
+          signal: reviewSignal,
+          ownershipError: validateBuiltinFileToolOwnership(pi, fileToolName),
+        }),
+      );
+      deleteCaseTranscripts(reviewerTranscripts, reviewCase.id);
+      return result;
     }
     const command = String((event.input as { command?: unknown }).command ?? "");
     const classification = classifyBash(command);
@@ -374,6 +543,7 @@ async function humanReview(
   ctx: ExtensionContext,
   reason = request.policyReason ?? "model review requires human judgment",
   onAllow?: () => boolean,
+  validateBeforeAllow?: () => string | undefined,
 ) {
   if (!ctx.hasUI) {
     return { block: true, reason: `Human approval required: ${reason}` };
@@ -383,6 +553,8 @@ async function humanReview(
     `${reason}\n\nExact ${request.tool} input:\n${formatHumanInput(request.input)}\n\nAllow once?`,
   );
   if (!allowed) return { block: true, reason: "Denied by user", terminate: true };
+  const validationError = validateBeforeAllow?.();
+  if (validationError) return terminalBlock(validationError);
   const locked = lockAllowedInput(event, "Approved");
   if (locked) return locked;
   if (onAllow && !onAllow()) {
@@ -580,6 +752,58 @@ export function isEligibleReactiveDestination(destination: {
 }): boolean {
   return destination.port === 443 && isPublicNetworkDestination(destination);
 }
+
+function isReviewableFileTool(toolName: string): toolName is "read" | "write" | "edit" {
+  return toolName === "read" || toolName === "write" || toolName === "edit";
+}
+
+function validateBuiltinFileToolOwnership(
+  pi: ExtensionAPI,
+  toolName: "read" | "write" | "edit",
+): string | undefined {
+  try {
+    const tool = pi.getAllTools().find((candidate) => candidate.name === toolName);
+    if (tool?.sourceInfo.source === "builtin") return;
+    return `Cannot review ${toolName}: Pi's effective ${toolName} tool is not the built-in executor`;
+  } catch (error) {
+    return `Cannot verify Pi's effective ${toolName} executor: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+function validateFileReviewBoundary(options: {
+  event: ToolCallEvent;
+  initialInputDigest: string;
+  expectedSessionEpoch: number;
+  expectedConfigGeneration: number;
+  currentSessionEpoch: number;
+  currentConfigGeneration: number;
+  signal?: AbortSignal;
+  ownershipError?: string;
+}): string | undefined {
+  if (options.ownershipError) return options.ownershipError;
+  if (options.signal?.aborted) {
+    return "File operation was cancelled while under review";
+  }
+  if (options.currentSessionEpoch !== options.expectedSessionEpoch) {
+    return "Pi session changed while this file operation was under review";
+  }
+  if (options.currentConfigGeneration !== options.expectedConfigGeneration) {
+    return "Reviewer configuration changed while this file operation was under review";
+  }
+  try {
+    if (canonicalSha256(options.event.input) !== options.initialInputDigest) {
+      return "File-tool input changed while this operation was under review";
+    }
+  } catch (error) {
+    return `File-tool input could not be revalidated: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  return;
+}
+
+function terminalBlock(reason: string) {
+  return { block: true, reason, terminate: true };
+}
+
 
 function formatHumanInput(input: Record<string, unknown>): string {
   const rendered = JSON.stringify(input, null, 2);

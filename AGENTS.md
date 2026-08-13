@@ -3,8 +3,13 @@
 ## Current security boundary
 
 - The extension mediates Pi `tool_call` events. Tiered model review applies to
-  agent-issued `bash`; non-bash tools remain under pi-perm's deterministic and
-  human-confirmation policy.
+  agent-issued `bash` and to `pi-perm` confirmation decisions for Pi's built-in
+  `read`, `write`, and `edit` tools. Deterministic file-tool allows and blocks
+  remain pi-perm decisions; arbitrary non-bash tools remain outside the
+  reviewer chain.
+- File-tool review is valid only while Pi's effective tool source remains the
+  built-in executor. Treat a missing or overridden `read`, `write`, or `edit`
+  source as a terminal block.
 - The registered bash executor must consume a one-use approval capability bound
   to the exact tool-call ID, input, CWD, configuration generation, session
   epoch, and frozen sandbox settings.
@@ -42,6 +47,8 @@
 - Direct process-local integration APIs are future design work, not supported
   behavior. Keep proposals in `docs/future-extension-integration.md` until a
   versioned contract and adversarial tests exist.
+- Treat pi-perm's `audit.jsonl` as policy-stage telemetry, not a final approval
+  or execution ledger. A file confirmation entry records a review handoff.
 
 ## Change discipline
 

@@ -139,3 +139,48 @@ test("evidence deduplication stops when pruning removes its message pair", async
   assert.equal(transcript.messages.length, 0);
   assert.equal(transcriptRetainsEvidence(transcript, "large-case"), false);
 });
+
+test("reviewer timeout is hard-bounded when the provider ignores cancellation", async () => {
+  const registry = {
+    find: () => ({ provider: "test", id: "reviewer" }),
+    hasConfiguredAuth: () => true,
+    complete: async () => new Promise(() => {}),
+  } as any;
+  const started = Date.now();
+  const result = await invokeModelReviewer(
+    registry,
+    { reviewer: { level: 0, model: "test/reviewer", timeoutMs: 20 } },
+    { tool: "read", input: { path: "/outside" }, cwd: "/w", minimumLevel: 0 },
+    undefined,
+    undefined,
+  );
+  assert.equal(result.kind, "timeout");
+  assert.ok(Date.now() - started < 1_000);
+});
+
+test("invalidated reviews do not enter persistent reviewer history", async () => {
+  const transcript = createReviewerTranscript();
+  const registry = {
+    find: () => ({ provider: "test", id: "reviewer" }),
+    hasConfiguredAuth: () => true,
+    complete: async () => ({
+      stopReason: "stop",
+      content: [{ type: "text", text: '{"decision":"allow","reason":"ok"}' }],
+    }),
+  } as any;
+  const result = await invokeModelReviewer(
+    registry,
+    { reviewer: { level: 0, model: "test/reviewer" } },
+    { tool: "read", input: { path: "/outside" }, cwd: "/w", minimumLevel: 0 },
+    undefined,
+    undefined,
+    {
+      transcript,
+      caseId: "cancelled-case",
+      validateBeforeCommit: () => "file review was invalidated",
+    },
+  );
+  assert.equal(result.kind, "cancelled");
+  assert.deepEqual(transcript.messages, []);
+  assert.deepEqual(transcript.pairs, []);
+});

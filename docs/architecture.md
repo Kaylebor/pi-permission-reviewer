@@ -16,16 +16,28 @@ responses; they do not depend on provider-side session APIs.
 
 ```text
 Pi tool_call
-  -> deterministic block / human route / review ladder
+  -> pi-perm deterministic allow / terminal block / confirmation
+  -> bash classifier or built-in file-tool minimum level
+  -> review ladder / human fallback
   -> immutable ReviewCase
-  -> one-use ApprovalCapability
-  -> registered bash executor consumes capability
-  -> per-invocation SRT worker
+  -> bash: one-use ApprovalCapability -> registered executor -> SRT worker
        -> explicit deny: terminal
        -> off-list public HTTPS: reactive review ladder
        -> structured NetworkDecision
        -> Boolean allow/deny IPC
+  -> read/write/edit: locked exact input -> Pi built-in executor
 ```
+
+For Pi's built-in file tools, only a `pi-perm` confirmation enters the review
+plane: `read` starts at level 0, while `write` and `edit` start at level 1.
+The confirmation interception uses a private sentinel thrown from the
+suppressed pi-perm UI request, not its eventual denial text, so deterministic
+blocks remain terminal and the probe does not create a fake user-denial audit
+entry. The effective tool source is revalidated as Pi built-in before approval;
+missing or replaced file executors are terminally rejected. File tools retain
+exact-input locking but do not use the bash approval capability or claim SRT
+coverage. Pi-perm's `audit.jsonl` records the policy-stage confirmation handoff,
+not the later reviewer result or proof that the built-in executor ran.
 
 Command persistence creates a separate reviewer history for each case and
 model, reuses the winning history for reactive review, and deletes it when the

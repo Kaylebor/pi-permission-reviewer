@@ -20,10 +20,13 @@ implemented. Configuration and adversarial coverage will evolve before an npm
 release. The current reactive worker has been exercised on macOS; Linux runtime
 validation is still pending and Windows is not currently a supported target.
 
-Tiered model review currently applies to agent-issued `bash` calls. File tools
-remain under `pi-perm`'s deterministic boundary and human confirmation flow;
+Tiered model review applies to agent-issued `bash` calls and to `pi-perm`
+confirmation decisions for Pi's built-in `read`, `write`, and `edit` tools.
+Deterministic `pi-perm` allows and blocks remain terminal policy outcomes;
 arbitrary custom tools, MCP actions, and user-entered `!` commands are not
-covered by the reviewer chain.
+covered by the reviewer chain. If another extension replaces an effective
+`read`, `write`, or `edit` tool, this package blocks that call instead of
+approving an executor it does not own.
 
 ### Trust boundary
 
@@ -114,7 +117,10 @@ agent tool calls and reports the initialization error.
 
 Runtime audit and generated sandbox files live under
 `~/.pi/agent/permission-reviewer`. Set `PI_PERMISSION_REVIEWER_RUNTIME_DIR` to
-override that machine-local location.
+override that machine-local location. The bundled `audit.jsonl` is pi-perm
+policy-stage telemetry, not a complete reviewer authorization or execution
+ledger. In particular, a file-tool confirmation decision records the handoff
+to review, not its eventual model/human result; do not infer execution from it.
 
 Every model is identified by Pi's own `provider/model` identity. Built-in
 providers, custom `models.json` providers, and extension-registered providers
@@ -196,6 +202,9 @@ bounded evidence packet.
   rules, even when the base command is normally skipped or human-routed.
 - Recognized credential paths, remote content piped into a shell interpreter,
   and severe system actions are blocked deterministically.
+- A `pi-perm` confirmation for built-in `read` starts at level 0. Confirmed
+  built-in `write` and `edit` operations start at level 1. Their allowed exact
+  input is locked before Pi's built-in executor runs.
 
 These rules are intentionally conservative and are not a shell security parser.
 Obfuscated shell spellings may bypass literal deterministic matches, but shell
@@ -203,7 +212,9 @@ metacharacters still route the action to level 1 review. The OS sandbox remains
 the security boundary; do not grant reviewers access to secrets or unrestricted
 egress on the assumption that command classification is complete.
 Deterministic `pi-perm` blocks are terminal and cannot be overturned by a
-reviewer; only operations classified for confirmation enter the model chain.
+reviewer; only `pi-perm` confirmation decisions enter the model chain. A
+reviewer approval of a file operation does not add a persistent `pi-perm`
+allow: it authorizes only that locked Pi tool call.
 
 ## Reactive network review
 

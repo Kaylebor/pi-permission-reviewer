@@ -24,6 +24,7 @@ function fakeDependencies(
     activeProfile: "workspace",
     sessionAllows: new Map(),
     sessionFilesystemAllows: new Map(),
+    auditFile: join(tmpdir(), "pi-perm-test-audit.jsonl"),
   };
   const modules = {
     extension:
@@ -78,6 +79,7 @@ test("uses the current CWD for private pi-perm decisions and SRT snapshots", asy
           activeProfile: "workspace",
           sessionAllows: new Map([["old", {}]]),
           sessionFilesystemAllows: new Map([["old", {}]]),
+          auditFile: join(tmpdir(), "pi-perm-test-audit.jsonl"),
         };
         return {
           state,
@@ -120,6 +122,37 @@ test("uses the current CWD for private pi-perm decisions and SRT snapshots", asy
   await adapter.resetSession();
 });
 
+test("confirmation inspection uses a private sentinel", async () => {
+  let continuedAfterPrompt = false;
+  const dependencies = fakeDependencies({
+    extension: {
+      createPiPermExtension() {
+        const state = {
+          cwd,
+          config: {},
+          activeProfile: "workspace",
+          sessionAllows: new Map(),
+          sessionFilesystemAllows: new Map(),
+          auditFile: join(tmpdir(), "pi-perm-test-audit.jsonl"),
+        };
+        return {
+          state,
+          async handleToolCall(_event: unknown, ctx: any) {
+            await ctx.ui.select("confirm", ["Deny"]);
+            continuedAfterPrompt = true;
+          },
+        };
+      },
+    },
+  });
+  const adapter = await createPiPermAdapter({ cwd }, dependencies);
+  assert.deepEqual(
+    await adapter.inspectToolCall({ toolName: "read" } as any, { cwd, ui: {} } as any),
+    { kind: "confirm", reason: "pi-perm requested confirmation for this file operation" },
+  );
+  assert.equal(continuedAfterPrompt, false);
+});
+
 test("clears private session grants at Pi session boundaries", async () => {
   const state = {
     cwd,
@@ -127,6 +160,7 @@ test("clears private session grants at Pi session boundaries", async () => {
     activeProfile: "workspace",
     sessionAllows: new Map([["grant", { lastUsedAt: Date.now() }]]),
     sessionFilesystemAllows: new Map([["path", { lastUsedAt: Date.now() }]]),
+    auditFile: join(tmpdir(), "pi-perm-test-audit.jsonl"),
   };
   const adapter = await createPiPermAdapter(
     { cwd },
@@ -181,6 +215,7 @@ test("fails closed for malformed private module exports and extension shapes", a
               activeProfile: "workspace",
               sessionAllows: new Map(),
               sessionFilesystemAllows: new Map(),
+              auditFile: join(tmpdir(), "pi-perm-test-audit.jsonl"),
             },
           };
         },
@@ -225,6 +260,7 @@ test("fails closed when a private decision violates the validated contract", asy
               activeProfile: "workspace",
               sessionAllows: new Map(),
               sessionFilesystemAllows: new Map(),
+              auditFile: join(tmpdir(), "pi-perm-test-audit.jsonl"),
             },
             async handleToolCall() {
               return { block: "no" };

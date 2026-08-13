@@ -16,6 +16,11 @@ export interface PermissionDecision {
   terminate?: boolean;
 }
 
+export type PermissionInspection =
+  | { kind: "allow" }
+  | { kind: "block"; decision: PermissionDecision }
+  | { kind: "confirm"; reason: string };
+
 export interface PiPermAdapter {
   /** The CWD used to construct the private pi-perm state. */
   readonly initialCwd: string;
@@ -25,6 +30,10 @@ export interface PiPermAdapter {
     event: ToolCallEvent,
     ctx: ExtensionContext,
   ): Promise<PermissionDecision | undefined>;
+  inspectToolCall(
+    event: ToolCallEvent,
+    ctx: ExtensionContext,
+  ): Promise<PermissionInspection>;
   getHardenedSrtSettings(
     cwd: string,
   ): Promise<Readonly<Record<string, unknown>>>;
@@ -67,6 +76,8 @@ interface PrivatePiPermModules {
   getActiveProfile: (state: PiPermState) => unknown;
   toSrtSettings: (profile: Record<string, unknown>) => unknown;
 }
+
+const CONFIRMATION_PROBE = Symbol("pi-permission-reviewer.confirmation-probe");
 
 export async function createPiPermAdapter(
   options: PiPermAdapterOptions,
@@ -136,6 +147,40 @@ class ActivePiPermAdapter implements PiPermAdapter {
     });
   }
 
+  inspectToolCall(
+    event: ToolCallEvent,
+    ctx: ExtensionContext,
+  ): Promise<PermissionInspection> {
+    return this.#withCwd(ctx.cwd, async () => {
+      try {
+        const decision = validateDecision(
+          await this.#extension.handleToolCall(event, {
+            ...ctx,
+            ui: {
+              ...ctx.ui,
+              confirm: async () => { throw CONFIRMATION_PROBE; },
+              select: async () => { throw CONFIRMATION_PROBE; },
+              prompt: async () => { throw CONFIRMATION_PROBE; },
+            },
+          } as ExtensionContext),
+        );
+        return decision?.block
+          ? { kind: "block", decision }
+          : decision === undefined
+            ? { kind: "allow" }
+            : { kind: "block", decision: blockedDecision("Permission engine returned an unsupported decision") };
+      } catch (error) {
+        if (error === CONFIRMATION_PROBE) {
+          return { kind: "confirm", reason: "pi-perm requested confirmation for this file operation" };
+        }
+        return {
+          kind: "block",
+          decision: blockedDecision(`Permission engine failed to evaluate: ${errorMessage(error)}`),
+        };
+      }
+    });
+  }
+
   getHardenedSrtSettings(
     cwd: string,
   ): Promise<Readonly<Record<string, unknown>>> {
@@ -183,6 +228,9 @@ function failedAdapter(initialCwd: string, error: string): PiPermAdapter {
     initializationError: reason,
     async handleToolCall() {
       return blockedDecision(reason);
+    },
+    async inspectToolCall() {
+      return { kind: "block", decision: blockedDecision(reason) };
     },
     async getHardenedSrtSettings() {
       throw new Error(reason);
