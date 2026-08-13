@@ -6,5 +6,9 @@
     "toolTokens": 2000,
     "persistence": "command"
   },
+  "reactiveReview": {
+    "reasoning": "one-lower",
+    "floor": "low"
+  },
   "policy": "Escalate whenever the exact effects or authorization are unclear."
 }

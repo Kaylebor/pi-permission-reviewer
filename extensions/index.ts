@@ -9,7 +9,11 @@ import { join } from "node:path";
 import { ApprovalStore, createReviewCase } from "../src/approval-store.ts";
 import { classifyBash } from "../src/classifier.ts";
 import { handleConfigCommand } from "../src/config-ui.ts";
-import { DEFAULT_REVIEW_CONTEXT, loadConfig } from "../src/config.ts";
+import {
+  DEFAULT_REACTIVE_REVIEW,
+  DEFAULT_REVIEW_CONTEXT,
+  loadConfig,
+} from "../src/config.ts";
 import { ContextLedger, type ReviewContextEvidence } from "../src/context-ledger.ts";
 import { lockToolInput } from "../src/input-lock.ts";
 import { runReviewLevels } from "../src/levels.ts";
@@ -22,13 +26,16 @@ import {
   createReviewerTranscript,
   invokeModelReviewer,
   invokeNetworkReviewer,
+  transcriptRetainsEvidence,
   type ReviewerTranscript,
 } from "../src/reviewer.ts";
 import type { ApprovalCapability, NetworkDecision, ReviewCase } from "../src/review-types.ts";
 import type {
   ReviewerConfig,
+  ReactiveReviewConfig,
   ReviewRequest,
 } from "../src/types.ts";
+import type { ThinkingLevel } from "@earendil-works/pi-ai";
 
 export default async function permissionReviewer(pi: ExtensionAPI) {
   let loaded = loadConfig();
@@ -108,6 +115,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
                   reviewSignal,
                   configGeneration,
                   loaded.config.reviewers,
+                  loaded.config.reactiveReview ?? DEFAULT_REACTIVE_REVIEW,
                   caseEvidence.get(capability.reviewCase.id),
                   loaded.config.reviewContext?.persistence ?? "command",
                   reviewerTranscripts,
@@ -284,7 +292,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
             request,
             reviewConfig.config.policy,
             reviewSignal,
-            { evidence, transcript },
+            { evidence, transcript, caseId: reviewCase.id },
           ),
         }),
     });
@@ -394,6 +402,7 @@ async function reviewNetworkRequest(
   signal: AbortSignal | undefined,
   currentConfigGeneration: number,
   reviewers: ReviewerConfig[],
+  reactiveReview: ReactiveReviewConfig,
   evidence: ReviewContextEvidence | undefined,
   persistence: "command" | "session",
   transcripts: Map<string, ReviewerTranscript>,
@@ -411,6 +420,7 @@ async function reviewNetworkRequest(
     reason = "Reviewer configuration changed after the command was approved";
   } else if (approved.reviewer && approved.assessment) {
     const ordered = orderReactiveReviewers(reviewers, approved.reviewer);
+    const resumedWinner = ordered[0];
     const reviewed = await runReviewLevels({
       reviewers: ordered,
       minimumLevel: approved.reviewer.level,
@@ -420,16 +430,30 @@ async function reviewNetworkRequest(
         persistence,
         transcripts,
         queues,
-        invoke: (transcript) => invokeNetworkReviewer(
-          ctx.modelRegistry,
-          invocation.reviewer,
-          approved.request,
-          approved.assessment!,
-          destination,
-          approved.reviewCase.policy,
-          signal,
-          { evidence, transcript },
-        ),
+        invoke: (transcript) => {
+          const resumesWinner = invocation.reviewer === resumedWinner;
+          return invokeNetworkReviewer(
+            ctx.modelRegistry,
+            invocation.reviewer,
+            approved.request,
+            approved.assessment!,
+            destination,
+            approved.reviewCase.policy,
+            signal,
+            {
+              // The resumed winner already has this case's original evidence in
+              // its local transcript. New fallback/escalation reviewers do not.
+              ...(!resumesWinner || !transcriptRetainsEvidence(transcript, caseId)
+                ? { evidence }
+                : {}),
+              transcript,
+              caseId,
+              ...(resumesWinner
+                ? { reasoning: resolveReactiveReasoning(invocation.reviewer, reactiveReview) }
+                : {}),
+            },
+          );
+        },
       }),
     });
     if (reviewed.decision === "allow") {
@@ -461,6 +485,21 @@ async function reviewNetworkRequest(
   };
 }
 
+export function resolveReactiveReasoning(
+  reviewer: ReviewerConfig,
+  config: ReactiveReviewConfig,
+): ThinkingLevel {
+  const configured = reviewer.reasoning ?? "low";
+  if (config.reasoning === "inherit") return configured;
+  if (config.reasoning === "minimum") return "minimal";
+  if (config.reasoning !== "one-lower") return config.reasoning;
+  const levels: ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+  const current = levels.indexOf(configured);
+  const floor = levels.indexOf(config.floor);
+  if (current <= floor) return configured;
+  return levels[Math.max(current - 1, floor)]!;
+}
+
 function orderReactiveReviewers(
   reviewers: ReviewerConfig[],
   winner: ReviewerConfig,
@@ -468,8 +507,15 @@ function orderReactiveReviewers(
   return [
     winner,
     ...reviewers.filter((reviewer) =>
-      reviewer.model !== winner.model && reviewer.level >= winner.level),
+      reviewer.level >= winner.level && !sameReviewer(reviewer, winner)),
   ];
+}
+
+function sameReviewer(left: ReviewerConfig, right: ReviewerConfig): boolean {
+  return left.level === right.level &&
+    left.model === right.model &&
+    (left.reasoning ?? "low") === (right.reasoning ?? "low") &&
+    (left.timeoutMs ?? 60_000) === (right.timeoutMs ?? 60_000);
 }
 
 async function invokeWithReviewerHistory<T>(options: {

@@ -13,6 +13,18 @@ export interface PermissionReviewerConfig {
   reviewers: ReviewerConfig[];
   policy?: string;
   reviewContext?: ReviewContextConfig;
+  reactiveReview?: ReactiveReviewConfig;
+}
+
+export type ReactiveReasoning =
+  | "inherit"
+  | "one-lower"
+  | "minimum"
+  | ThinkingLevel;
+
+export interface ReactiveReviewConfig {
+  reasoning: ReactiveReasoning;
+  floor: ThinkingLevel;
 }
 
 export interface ReviewContextConfig {

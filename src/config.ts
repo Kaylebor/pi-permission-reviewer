@@ -20,9 +20,14 @@ export const DEFAULT_REVIEW_CONTEXT = {
   toolTokens: 2_000,
   persistence: "command",
 } as const;
+export const DEFAULT_REACTIVE_REVIEW = {
+  reasoning: "one-lower",
+  floor: "low",
+} as const;
 const DEFAULT_CONFIG: PermissionReviewerConfig = {
   reviewers: [],
   reviewContext: DEFAULT_REVIEW_CONTEXT,
+  reactiveReview: DEFAULT_REACTIVE_REVIEW,
 };
 
 export interface LoadedConfig {
@@ -57,14 +62,53 @@ export function validateConfig(value: unknown): PermissionReviewerConfig {
     throw new Error("reviewers must be an array");
   }
   const reviewers = value.reviewers.map(validateReviewer);
+  const reviewerKeys = new Set<string>();
+  for (const reviewer of reviewers) {
+    const key = `${reviewer.level}\0${reviewer.model}`;
+    if (reviewerKeys.has(key)) {
+      throw new Error(`duplicate reviewer level/model: level ${reviewer.level} ${reviewer.model}`);
+    }
+    reviewerKeys.add(key);
+  }
   if (value.policy !== undefined && typeof value.policy !== "string") {
     throw new Error("policy must be a string");
   }
   const reviewContext = validateReviewContext(value.reviewContext);
+  const reactiveReview = validateReactiveReview(value.reactiveReview);
   return {
     reviewers,
     reviewContext,
+    reactiveReview,
     ...(value.policy ? { policy: value.policy } : {}),
+  };
+}
+
+function validateReactiveReview(value: unknown): NonNullable<PermissionReviewerConfig["reactiveReview"]> {
+  if (value === undefined) return { ...DEFAULT_REACTIVE_REVIEW };
+  if (!isRecord(value)) throw new Error("reactiveReview must be an object");
+  const reasoning = value.reasoning ?? DEFAULT_REACTIVE_REVIEW.reasoning;
+  const floor = value.floor ?? DEFAULT_REACTIVE_REVIEW.floor;
+  const validReasoning = [
+    "inherit",
+    "one-lower",
+    "minimum",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ];
+  const validFloors = ["minimal", "low", "medium", "high", "xhigh", "max"];
+  if (typeof reasoning !== "string" || !validReasoning.includes(reasoning)) {
+    throw new Error("reactiveReview.reasoning is invalid");
+  }
+  if (typeof floor !== "string" || !validFloors.includes(floor)) {
+    throw new Error("reactiveReview.floor is invalid");
+  }
+  return {
+    reasoning: reasoning as NonNullable<PermissionReviewerConfig["reactiveReview"]>["reasoning"],
+    floor: floor as NonNullable<PermissionReviewerConfig["reactiveReview"]>["floor"],
   };
 }
 
@@ -129,7 +173,7 @@ function validateReviewer(value: unknown, index: number): ReviewerConfig {
   if (typeof value.model !== "string" || !parseModelSpec(value.model)) {
     throw new Error(`reviewers[${index}].model must be provider/model`);
   }
-  const validReasoning = ["minimal", "low", "medium", "high", "xhigh"];
+  const validReasoning = ["minimal", "low", "medium", "high", "xhigh", "max"];
   if (
     value.reasoning !== undefined &&
     (typeof value.reasoning !== "string" ||

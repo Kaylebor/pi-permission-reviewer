@@ -144,6 +144,17 @@ provider-neutral local histories; the extension does not require a provider-side
 conversation API. Future constrained read-only inspection should be added as an
 explicit capability rather than exposing shell access.
 
+Reactive continuation defaults to `reactiveReview.reasoning: "one-lower"` with
+a `low` floor. Only the original reviewer that allowed the command is reduced:
+for example, `medium` becomes `low`, `xhigh` becomes `high`, and `max` becomes
+`xhigh`. A reviewer
+already configured below the floor is not raised. Same-level fallbacks and all
+higher-level escalations use their normal configured reasoning. Set the strategy
+to `inherit`, `minimum`, or an explicit Pi reasoning level to change this. The
+resumed winner also reuses the original evidence already in its local history
+instead of sending a duplicate copy; a newly reached reviewer receives the full
+bounded evidence packet.
+
 ## Current routing policy
 
 - Known read-only commands skip model review but still run under the sandbox.

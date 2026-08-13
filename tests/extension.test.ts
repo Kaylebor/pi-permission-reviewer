@@ -5,7 +5,18 @@ import { join } from "node:path";
 import test from "node:test";
 import permissionReviewer, {
   isEligibleReactiveDestination,
+  resolveReactiveReasoning,
 } from "../extensions/index.ts";
+
+test("reactive continuation lowers only above the configured floor", () => {
+  const config = { reasoning: "one-lower" as const, floor: "low" as const };
+  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "xhigh" }, config), "high");
+  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "medium" }, config), "low");
+  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "low" }, config), "low");
+  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "minimal" }, config), "minimal");
+  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "max" }, config), "xhigh");
+  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "high" }, { reasoning: "minimum", floor: "low" }), "minimal");
+});
 
 test("reactive network review is limited to public-looking HTTPS", () => {
   assert.equal(

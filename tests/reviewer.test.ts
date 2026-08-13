@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createReviewerTranscript,
+  invokeModelReviewer,
   invokeNetworkReviewer,
   parseAssessment,
+  transcriptRetainsEvidence,
 } from "../src/reviewer.ts";
 
 test("parses the strict reviewer contract", () => {
@@ -72,8 +75,67 @@ test("reviewer transcripts carry the prior assessment into a local continuation"
     },
   } as any;
   const request = { tool: "bash", input: { command: "pwd" }, cwd: "/w", minimumLevel: 0 };
-  await invokeModelReviewer(registry, { reviewer: { level: 0, model: "test/reviewer" } }, request, undefined, undefined, { transcript });
-  await invokeNetworkReviewer(registry, { level: 0, model: "test/reviewer" }, request, { decision: "allow", reason: "ok" }, { host: "github.com", port: 443 }, undefined, undefined, { transcript });
+  const evidence = {
+    mode: "metadata" as const,
+    metadata: {
+      observedMessages: 1,
+      representedConversationMessages: 0,
+      representedToolMessages: 0,
+      omittedConversationMessages: 1,
+      omittedToolMessages: 0,
+      conversationTokens: 0,
+      toolTokens: 0,
+    },
+  };
+  await invokeModelReviewer(registry, { reviewer: { level: 0, model: "test/reviewer" } }, request, undefined, undefined, { transcript, evidence, caseId: "case-1" });
+  await invokeNetworkReviewer(registry, { level: 0, model: "test/reviewer" }, request, { decision: "allow", reason: "ok" }, { host: "github.com", port: 443 }, undefined, undefined, { transcript, caseId: "case-1" });
   assert.equal(contexts[1].messages.length, 3);
   assert.equal(transcript.messages.length, 4);
+  assert.deepEqual(transcript.pairs, [
+    { caseId: "case-1", hasEvidence: true },
+    { caseId: "case-1", hasEvidence: false },
+  ]);
+  assert.ok(JSON.parse(contexts[0].messages[0].content).context);
+  assert.equal(JSON.parse(contexts[1].messages[2].content).context, undefined);
+});
+
+test("evidence deduplication stops when pruning removes its message pair", async () => {
+  const transcript = createReviewerTranscript();
+  const model = { provider: "test", id: "reviewer" };
+  const registry = {
+    find: () => model,
+    hasConfiguredAuth: () => true,
+    complete: async () => ({
+      api: "test",
+      provider: "test",
+      model: "reviewer",
+      stopReason: "stop",
+      content: [{ type: "text", text: '{"decision":"allow","reason":"ok"}' }],
+    }),
+  } as any;
+  const request = { tool: "bash", input: { command: "pwd" }, cwd: "/w", minimumLevel: 0 };
+  const evidence = {
+    mode: "transcript" as const,
+    metadata: {
+      observedMessages: 1,
+      representedConversationMessages: 1,
+      representedToolMessages: 0,
+      omittedConversationMessages: 0,
+      omittedToolMessages: 0,
+      conversationTokens: 30_000,
+      toolTokens: 0,
+    },
+    conversation: [{ role: "user" as const, text: "x".repeat(90_000) }],
+    tools: [],
+  };
+  await invokeModelReviewer(
+    registry,
+    { reviewer: { level: 0, model: "test/reviewer" } },
+    request,
+    undefined,
+    undefined,
+    { transcript, evidence, caseId: "large-case" },
+  );
+  assert.equal(transcript.messages.length, 0);
+  assert.equal(transcriptRetainsEvidence(transcript, "large-case"), false);
 });

@@ -30,6 +30,7 @@ const ACTIONS = [
   "Remove a reviewer",
   "Move a tied reviewer",
   "Configure review context",
+  "Configure reactive review",
   "Edit policy",
   "Edit JSON (advanced)",
 ] as const;
@@ -72,6 +73,7 @@ export async function handleConfigCommand(
   if (action === "Remove a reviewer") return removeReviewer(ctx, options);
   if (action === "Move a tied reviewer") return moveReviewer(ctx, options);
   if (action === "Configure review context") return configureReviewContext(ctx, options);
+  if (action === "Configure reactive review") return configureReactiveReview(ctx, options);
   if (action === "Edit policy") return editPolicy(ctx, options);
   return editJson(ctx, options);
 }
@@ -110,6 +112,10 @@ function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void 
     (reviewer, index) =>
       `${index + 1}. level ${reviewer.level}: ${reviewer.model} (${reviewer.reasoning ?? "low"}, ${reviewer.timeoutMs ?? 60_000}ms)`,
   );
+  const reactiveReview = loaded.config.reactiveReview ?? {
+    reasoning: "one-lower",
+    floor: "low",
+  };
   ctx.ui.notify(
     [
       `Config: ${loaded.source ?? "not created"}`,
@@ -117,9 +123,49 @@ function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void 
       ...(reviewers.length > 0 ? reviewers : ["Reviewers: none"]),
       `Policy: ${loaded.config.policy ?? "default reviewer policy"}`,
       `Context: ${reviewContext.mode}, ${reviewContext.conversationTokens} conversation tokens + ${reviewContext.toolTokens} tool tokens, ${reviewContext.persistence} persistence`,
+      `Reactive review: ${reactiveReview.reasoning}${reactiveReview.reasoning === "one-lower" ? ` (floor ${reactiveReview.floor})` : ""}`,
     ].join("\n"),
     loaded.valid ? "info" : "error",
   );
+}
+
+async function configureReactiveReview(
+  ctx: ConfigContext,
+  options: ConfigCommandOptions,
+): Promise<void> {
+  const loaded = options.getLoaded();
+  const reasoning = await ctx.ui.select("Resumed winner reasoning", [
+    "one-lower — reduce one step, then use the configured floor",
+    "inherit — keep the winner's configured effort",
+    "minimum — use minimal effort",
+    "minimal — explicit minimal effort",
+    "low — explicit low effort",
+    "medium — explicit medium effort",
+    "high — explicit high effort",
+    "xhigh — explicit xhigh effort",
+    "max — explicit max effort",
+  ]);
+  if (!reasoning) return;
+  let floor = loaded.config.reactiveReview?.floor ?? "low";
+  if (reasoning.startsWith("one-lower")) {
+    const selectedFloor = await ctx.ui.select("One-step reduction floor", [
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    if (!selectedFloor) return;
+    floor = selectedFloor as NonNullable<PermissionReviewerConfig["reactiveReview"]>["floor"];
+  }
+  persist(ctx, options, {
+    ...loaded.config,
+    reactiveReview: {
+      reasoning: reasoning.split(" ", 1)[0] as NonNullable<PermissionReviewerConfig["reactiveReview"]>["reasoning"],
+      floor,
+    },
+  });
 }
 
 async function showModels(ctx: ConfigContext): Promise<void> {
@@ -183,6 +229,7 @@ async function addReviewer(
     "medium",
     "high",
     "xhigh",
+    "max",
   ]);
   if (!reasoning) return;
   const timeout = await ctx.ui.select("Reviewer timeout", [

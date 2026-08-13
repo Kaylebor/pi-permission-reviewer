@@ -1,5 +1,5 @@
 import type { ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { Message } from "@earendil-works/pi-ai";
+import type { Message, ThinkingLevel } from "@earendil-works/pi-ai";
 import { parseModelSpec } from "./config.ts";
 import type { ReviewContextEvidence } from "./context-ledger.ts";
 import type { ReviewerInvocation } from "./levels.ts";
@@ -26,10 +26,20 @@ Deny clear policy violations. Escalate when a stronger reviewer may resolve mate
 
 export interface ReviewerTranscript {
   messages: Message[];
+  pairs: Array<{ caseId?: string; hasEvidence: boolean }>;
 }
 
 export function createReviewerTranscript(): ReviewerTranscript {
-  return { messages: [] };
+  return { messages: [], pairs: [] };
+}
+
+export function transcriptRetainsEvidence(
+  transcript: ReviewerTranscript,
+  caseId: string,
+): boolean {
+  return transcript.pairs.some(
+    (pair) => pair.caseId === caseId && pair.hasEvidence,
+  );
 }
 
 export async function invokeModelReviewer(
@@ -42,6 +52,8 @@ export async function invokeModelReviewer(
     evidence?: ReviewContextEvidence;
     transcript?: ReviewerTranscript;
     continuation?: Record<string, unknown>;
+    reasoning?: ThinkingLevel;
+    caseId?: string;
   } = {},
 ): Promise<
   | { kind: "assessment"; assessment: ReviewAssessment }
@@ -82,7 +94,7 @@ export async function invokeModelReviewer(
       },
       {
         signal: combined,
-        reasoning: invocation.reviewer.reasoning ?? "low",
+        reasoning: options.reasoning ?? invocation.reviewer.reasoning ?? "low",
         maxTokens: 1_000,
       },
     );
@@ -112,11 +124,16 @@ export async function invokeModelReviewer(
           stopReason: "stop",
           timestamp: Date.now(),
         });
+        options.transcript.pairs.push({
+          ...(options.caseId ? { caseId: options.caseId } : {}),
+          hasEvidence: options.evidence !== undefined,
+        });
         while (
           options.transcript.messages.length > 24 ||
           JSON.stringify(options.transcript.messages).length > 80_000
         ) {
           options.transcript.messages.splice(0, 2);
+          options.transcript.pairs.shift();
         }
       }
       return { kind: "assessment", assessment };
@@ -146,7 +163,12 @@ export async function invokeNetworkReviewer(
   destination: { host: string; port?: number },
   policy: string | undefined,
   signal: AbortSignal | undefined,
-  options: { evidence?: ReviewContextEvidence; transcript?: ReviewerTranscript } = {},
+  options: {
+    evidence?: ReviewContextEvidence;
+    transcript?: ReviewerTranscript;
+    reasoning?: ThinkingLevel;
+    caseId?: string;
+  } = {},
 ): ReturnType<typeof invokeModelReviewer> {
   return invokeModelReviewer(
     registry,

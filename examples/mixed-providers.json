@@ -25,5 +25,9 @@
     "toolTokens": 2000,
     "persistence": "command"
   },
+  "reactiveReview": {
+    "reasoning": "one-lower",
+    "floor": "low"
+  },
   "policy": "Escalate uncertain side effects, authorization, credential access, and external writes."
 }

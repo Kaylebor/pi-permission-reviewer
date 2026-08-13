@@ -20,6 +20,10 @@ test("accepts tied and sparse reviewer levels", () => {
     toolTokens: 2_000,
     persistence: "command",
   });
+  assert.deepEqual(config.reactiveReview, {
+    reasoning: "one-lower",
+    floor: "low",
+  });
 });
 
 test("validates provider-neutral review context settings", () => {
@@ -36,6 +40,39 @@ test("validates provider-neutral review context settings", () => {
   assert.throws(
     () => validateConfig({ reviewers: [], reviewContext: { mode: "raw" } }),
     /mode must be transcript or metadata/,
+  );
+});
+
+test("validates reactive continuation reasoning", () => {
+  const config = validateConfig({
+    reviewers: [],
+    reactiveReview: { reasoning: "inherit", floor: "minimal" },
+  });
+  assert.deepEqual(config.reactiveReview, {
+    reasoning: "inherit",
+    floor: "minimal",
+  });
+  assert.throws(
+    () => validateConfig({ reviewers: [], reactiveReview: { reasoning: "cheapest" } }),
+    /reactiveReview\.reasoning is invalid/,
+  );
+});
+
+test("supports Pi max reasoning and rejects ambiguous reviewer identities", () => {
+  const config = validateConfig({
+    reviewers: [{ level: 0, model: "provider/model", reasoning: "max" }],
+    reactiveReview: { reasoning: "one-lower", floor: "max" },
+  });
+  assert.equal(config.reviewers[0].reasoning, "max");
+  assert.equal(config.reactiveReview?.floor, "max");
+  assert.throws(
+    () => validateConfig({
+      reviewers: [
+        { level: 0, model: "provider/model", reasoning: "low" },
+        { level: 0, model: "provider/model", reasoning: "high" },
+      ],
+    }),
+    /duplicate reviewer level\/model/,
   );
 });
 

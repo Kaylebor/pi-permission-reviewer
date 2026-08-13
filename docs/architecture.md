@@ -34,6 +34,13 @@ serializes calls to that history. Session boundaries and configuration reloads
 clear histories, approvals, cached evidence, and pi-perm's private session
 grants; they also abort active sandbox executions.
 
+Reactive review resumes the winning reviewer from the original permission case.
+Its continuation reasoning is configurable and defaults to one step below the
+winner's configured effort with a low floor. The original evidence is already
+present in that local history and is not duplicated. Availability fallbacks and
+higher-level escalation reviewers keep their configured effort and receive the
+full evidence packet when they have not seen the case.
+
 Private pi-perm imports are isolated in `src/pi-perm-adapter.ts`. The adapter
 requires exactly version 0.1.8 and validates every private state/module shape it
 uses. Dependency upgrades therefore require an explicit adapter compatibility
