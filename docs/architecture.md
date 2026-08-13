@@ -14,14 +14,19 @@ calls. A `ContextLedger` follows Pi's `context` snapshots and finalized
 metadata only. Local reviewer histories contain only reviewer prompts and
 responses; they do not depend on provider-side session APIs.
 
+All permission denials are non-terminating Pi tool results. The denied action
+cannot execute, but its reason returns to the agent so it can recover, choose a
+different action, or request user guidance. Reviewer and human escalation—not
+early turn termination—form the authority boundary.
+
 ```text
 Pi tool_call
-  -> pi-perm deterministic allow / terminal block / confirmation
+  -> pi-perm deterministic allow / authoritative block / confirmation
   -> bash classifier or built-in file-tool minimum level
   -> review ladder / human fallback
   -> immutable ReviewCase
   -> bash: one-use ApprovalCapability -> registered executor -> SRT worker
-       -> explicit deny: terminal
+       -> explicit deny: authoritative for that connection
        -> off-list public HTTPS: reactive review ladder
        -> structured NetworkDecision
        -> Boolean allow/deny IPC
@@ -32,9 +37,9 @@ For Pi's built-in file tools, only a `pi-perm` confirmation enters the review
 plane: `read` starts at level 0, while `write` and `edit` start at level 1.
 The confirmation interception uses a private sentinel thrown from the
 suppressed pi-perm UI request, not its eventual denial text, so deterministic
-blocks remain terminal and the probe does not create a fake user-denial audit
+blocks remain authoritative and the probe does not create a fake user-denial audit
 entry. The effective tool source is revalidated as Pi built-in before approval;
-missing or replaced file executors are terminally rejected. File tools retain
+missing or replaced file executors are rejected without execution. File tools retain
 exact-input locking but do not use the bash approval capability or claim SRT
 coverage. Pi-perm's `audit.jsonl` records the policy-stage confirmation handoff,
 not the later reviewer result or proof that the built-in executor ran.

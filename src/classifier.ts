@@ -24,7 +24,7 @@ const HARD_BLOCK = [
 ];
 
 // Dataflow operators defeat command-name allowlists and materially change the
-// action. Once terminal deny rules have run, always send them to the stronger
+// action. Once deterministic deny rules have run, always send them to the stronger
 // reviewer before applying human-only or known-safe shortcuts.
 const SHELL_INTERPRETERS = new Set([
   "ash",

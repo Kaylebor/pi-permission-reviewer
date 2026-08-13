@@ -9,12 +9,14 @@
   reviewer chain.
 - File-tool review is valid only while Pi's effective tool source remains the
   built-in executor. Treat a missing or overridden `read`, `write`, or `edit`
-  source as a terminal block.
+  source as an authoritative block.
 - The registered bash executor must consume a one-use approval capability bound
   to the exact tool-call ID, input, CWD, configuration generation, session
   epoch, and frozen sandbox settings.
-- Deterministic denies are terminal. Reviewers cannot weaken pi-perm or SRT
-  policy. Reviewer calls remain tool-less, bounded, and fail closed.
+- Deterministic denies are authoritative for the exact action. Reviewers cannot
+  weaken pi-perm or SRT policy. Permission results must not set Pi's `terminate`
+  flag: return the reason as a blocked tool result so the agent can continue
+  autonomously. Reviewer calls remain tool-less, bounded, and fail closed.
 - Pi extensions are trusted in-process code. Direct filesystem, network, or
   `child_process` use by another extension is not intercepted. Never claim that
   this package mediates every effect of Pi or sandboxes other extensions.
@@ -57,6 +59,9 @@
 - Add regression tests for classifier precedence, capability binding, session
   and configuration invalidation, cancellation, worker cleanup, and every new
   reactive authorization path.
+- Assert that every permission block omits Pi's `terminate` flag. Hard turn
+  termination is outside this extension's permission model; escalation through
+  reviewers and the human is the authority path.
 - Keep README security claims narrower than the implemented boundary. Update
   README, architecture notes, examples, and future-design notes together when a
   change affects user expectations.

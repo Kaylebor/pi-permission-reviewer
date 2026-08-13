@@ -22,7 +22,7 @@ validation is still pending and Windows is not currently a supported target.
 
 Tiered model review applies to agent-issued `bash` calls and to `pi-perm`
 confirmation decisions for Pi's built-in `read`, `write`, and `edit` tools.
-Deterministic `pi-perm` allows and blocks remain terminal policy outcomes;
+Deterministic `pi-perm` allows and blocks remain authoritative policy outcomes;
 arbitrary custom tools, MCP actions, and user-entered `!` commands are not
 covered by the reviewer chain. If another extension replaces an effective
 `read`, `write`, or `edit` tool, this package blocks that call instead of
@@ -134,11 +134,13 @@ Semantics:
 - Array order breaks ties. Unavailable, failed, or timed-out entries fall
   through to the next tied reviewer; each level accepts at most one assessment.
 - `allow` executes the exact, locked tool input.
-- `deny` blocks immediately.
+- `deny` blocks the exact action and returns the reason to the agent as a failed
+  tool result. Permission denials never request early turn termination, so the
+  agent can explain the restriction, choose another approach, or ask the user.
 - `escalate` advances to the next strictly higher level after tied fallbacks
   have served their availability role.
 - `human` or exhaustion reaches a human when interactive UI exists; headless
-  operation fails closed.
+  operation fails closed while still returning the denial to the agent.
 
 `level` expresses permission-review capability, not a provider or benchmark
 rank. Level 0 should handle routine decisions cheaply; level 1 should be the
@@ -211,7 +213,7 @@ Obfuscated shell spellings may bypass literal deterministic matches, but shell
 metacharacters still route the action to level 1 review. The OS sandbox remains
 the security boundary; do not grant reviewers access to secrets or unrestricted
 egress on the assumption that command classification is complete.
-Deterministic `pi-perm` blocks are terminal and cannot be overturned by a
+Deterministic `pi-perm` blocks are authoritative and cannot be overturned by a
 reviewer; only `pi-perm` confirmation decisions enter the model chain. A
 reviewer approval of a file operation does not add a persistent `pi-perm`
 allow: it authorizes only that locked Pi tool call.
@@ -232,7 +234,7 @@ from locally supplied messages.
 Allowing the destination resumes the same process; the command is not rerun.
 The decision is bound to the exact Pi tool-call ID and cached only for that
 host-port pair for the lifetime of that command. Explicit SRT deny rules remain
-terminal and never reach the reviewer. Headless operation denies off-list
+authoritative and never reach the reviewer. Headless operation denies off-list
 connections. Reviews are serialized, limited to eight distinct destinations per
 command, and cancelled after 30 seconds or when the command ends. Reactive
 approval is currently limited to public-looking HTTPS destinations on port 443;

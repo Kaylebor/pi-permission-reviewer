@@ -12,6 +12,15 @@ function builtinTool(name: string) {
   return [{ name, sourceInfo: { source: "builtin" } }];
 }
 
+function assertContinuableBlock(result: unknown): asserts result is {
+  block: true;
+  reason?: string;
+} {
+  const decision = result as Record<string, unknown>;
+  assert.equal(decision.block, true);
+  assert.equal(Object.hasOwn(decision, "terminate"), false);
+}
+
 test("reactive continuation lowers only above the configured floor", () => {
   const config = { reasoning: "one-lower" as const, floor: "low" as const };
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "xhigh" }, config), "high");
@@ -95,7 +104,7 @@ test("a deterministic pi-perm block cannot enter model review", async () => {
     },
   );
   assert.equal(modelCalled, false);
-  assert.equal((result as { block?: boolean }).block, true);
+  assertContinuableBlock(result);
   assert.match(String((result as { reason?: string }).reason), /.git\/hooks/);
 });
 
@@ -152,7 +161,7 @@ test("a deterministic block cannot spoof the confirmation protocol", async () =>
     },
   );
   assert.equal(modelCalled, false);
-  assert.equal((result as { block?: boolean }).block, true);
+  assertContinuableBlock(result);
   assert.equal(
     (result as { reason?: string }).reason,
     "Denied by user: production credential policy",
@@ -305,6 +314,7 @@ test("a pi-perm file confirmation is reviewed at the file tool's minimum level",
   };
   await permissionReviewer(pi as any);
   const reviewed: Array<{ model: string; request: Record<string, unknown> }> = [];
+  let reviewerDecision: "allow" | "deny" = "allow";
   const registry = {
     find(provider: string, id: string) {
       return { provider, id };
@@ -320,7 +330,7 @@ test("a pi-perm file confirmation is reviewed at the file tool's minimum level",
         content: [
           {
             type: "text",
-            text: JSON.stringify({ decision: "allow", reason: "bounded file operation" }),
+            text: JSON.stringify({ decision: reviewerDecision, reason: "bounded file operation" }),
           },
         ],
       };
@@ -353,6 +363,19 @@ test("a pi-perm file confirmation is reviewed at the file tool's minimum level",
     assert.equal(invocation.request.tool, toolName);
     assert.equal(invocation.request.minimumLevel, expectedLevel);
   }
+
+  reviewerDecision = "deny";
+  effectiveFileTool = "read";
+  const denied = await handlers.get("tool_call")!(
+    { toolName: "read", toolCallId: "review-denied-read", input: { path: "/denied-target" } },
+    {
+      cwd: process.cwd(),
+      hasUI: false,
+      ui: {},
+      modelRegistry: registry,
+    },
+  );
+  assertContinuableBlock(denied);
 });
 
 test("headless file review exhaustion fails closed", async () => {
@@ -391,6 +414,7 @@ test("headless file review exhaustion fails closed", async () => {
     },
   );
   assert.equal((result as { block?: boolean }).block, true);
+  assertContinuableBlock(result);
   assert.match(String((result as { reason?: string }).reason), /Human approval required/);
 });
 
@@ -429,6 +453,7 @@ test("human file approval is invalidated by a session change", async () => {
     },
   ) as { block?: boolean; reason?: string };
   assert.equal(result.block, true);
+  assertContinuableBlock(result);
   assert.match(String(result.reason), /session changed|cancelled/i);
 });
 
@@ -470,7 +495,7 @@ test("a deterministic pi-perm file block cannot enter model review", async () =>
     },
   );
   assert.equal(modelCalled, false);
-  assert.equal((result as { block?: boolean }).block, true);
+  assertContinuableBlock(result);
   assert.match(String((result as { reason?: string }).reason), /denied by permission profile/);
 });
 
@@ -502,7 +527,7 @@ test("file review fails closed when the effective tool is not Pi's builtin", asy
     },
   );
   assert.equal(modelCalled, false);
-  assert.equal((result as { block?: boolean }).block, true);
+  assertContinuableBlock(result);
   assert.match(String((result as { reason?: string }).reason), /not the built-in executor/);
 });
 
@@ -548,10 +573,11 @@ test("a session change invalidates a non-cooperative file reviewer", async () =>
   release();
   const result = await pending as { block?: boolean; reason?: string };
   assert.equal(result.block, true);
+  assertContinuableBlock(result);
   assert.match(String(result.reason), /session changed|cancelled/i);
 });
 
-test("an error after intercepted file confirmation remains terminal", async () => {
+test("an error after intercepted file confirmation remains blocked", async () => {
   const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
   process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
   const piPermConfig = join(runtime, "pi-perm.toml");
@@ -578,7 +604,7 @@ test("an error after intercepted file confirmation remains terminal", async () =
     },
   );
   assert.equal(modelCalled, false);
-  assert.equal((result as { block?: boolean }).block, true);
+  assertContinuableBlock(result);
   assert.match(String((result as { reason?: string }).reason), /restore failed/);
 });
 
@@ -605,7 +631,7 @@ test("malformed pi-perm configuration installs a fail-closed gate", async () => 
     toolCallId: "must-block",
     input: { command: "pwd" },
   });
-  assert.equal((result as { block?: boolean }).block, true);
+  assertContinuableBlock(result);
   assert.match(
     String((result as { reason?: string }).reason),
     /failed to initialize/,

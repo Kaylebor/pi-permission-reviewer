@@ -62,7 +62,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   });
   if (permissions.initializationError) {
     const reason = permissions.initializationError;
-    pi.on("tool_call", () => ({ block: true, reason, terminate: true }));
+    pi.on("tool_call", () => ({ block: true, reason }));
     pi.on("session_start", (_event, ctx) => ctx.ui.notify(reason, "error"));
     pi.registerCommand("permission-reviewer", {
       description: "Show the permission reviewer initialization error",
@@ -210,14 +210,14 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     if (isReviewableFileTool(event.toolName)) {
       const fileToolName = event.toolName;
       const ownershipError = validateBuiltinFileToolOwnership(pi, fileToolName);
-      if (ownershipError) return terminalBlock(ownershipError);
+      if (ownershipError) return blockToolCall(ownershipError);
       const fileSessionEpoch = sessionEpoch;
       const fileConfigGeneration = configGeneration;
       let initialInputDigest: string;
       try {
         initialInputDigest = canonicalSha256(event.input);
       } catch (error) {
-        return terminalBlock(
+        return blockToolCall(
           `File-tool input could not be snapshotted: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -232,9 +232,9 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         signal: ctx.signal,
         ownershipError: validateBuiltinFileToolOwnership(pi, fileToolName),
       });
-      if (boundaryError) return terminalBlock(boundaryError);
+      if (boundaryError) return blockToolCall(boundaryError);
       if (inspected.kind === "block") {
-        return { ...inspected.decision, terminate: true };
+        return inspected.decision;
       }
       if (inspected.kind === "allow") {
         return lockAllowedInput(event, "Permission-approved");
@@ -267,7 +267,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
           sandboxSettings: {},
         });
       } catch (error) {
-        return { block: true, reason: `Could not snapshot the permission boundary: ${error instanceof Error ? error.message : String(error)}`, terminate: true };
+        return blockToolCall(`Could not snapshot the permission boundary: ${error instanceof Error ? error.message : String(error)}`);
       }
       const reviewConfig = loaded;
       const reviewGeneration = configGeneration;
@@ -342,7 +342,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       });
       if (postReviewError) {
         deleteCaseTranscripts(reviewerTranscripts, reviewCase.id);
-        return terminalBlock(postReviewError);
+        return blockToolCall(postReviewError);
       }
       if (reviewed.decision === "allow") {
         deleteCaseTranscripts(reviewerTranscripts, reviewCase.id);
@@ -350,7 +350,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       }
       if (reviewed.decision === "deny") {
         deleteCaseTranscripts(reviewerTranscripts, reviewCase.id);
-        return { block: true, reason: reviewed.reason, terminate: true };
+        return blockToolCall(reviewed.reason);
       }
       const result = await humanReview(
         event,
@@ -375,7 +375,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     const command = String((event.input as { command?: unknown }).command ?? "");
     const classification = classifyBash(command);
     if (classification.action === "block") {
-      return { block: true, reason: classification.reason, terminate: true };
+      return blockToolCall(classification.reason);
     }
 
     let confirmationRequested = false;
@@ -394,7 +394,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       },
     } as ExtensionContext);
     if (permissionDecision?.block && !confirmationRequested) {
-      return { ...permissionDecision, terminate: true };
+      return permissionDecision;
     }
     const request: ReviewRequest = {
       tool: event.toolName,
@@ -419,7 +419,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         sandboxSettings: await permissions.getHardenedSrtSettings(ctx.cwd),
       });
     } catch (error) {
-      return { block: true, reason: `Could not snapshot the permission boundary: ${error instanceof Error ? error.message : String(error)}`, terminate: true };
+      return blockToolCall(`Could not snapshot the permission boundary: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (!permissionDecision && classification.action === "skip") {
       return allowOnce(event, approvals, { reviewCase, request }, "Skipped");
@@ -502,7 +502,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     }
     if (reviewed.decision === "deny") {
       cleanupCaseState(reviewCase.id, reviewerTranscripts, caseEvidence);
-      return { block: true, reason: reviewed.reason, terminate: true };
+      return blockToolCall(reviewed.reason);
     }
     const result = await humanReview(event, request, ctx, reviewed.reason, () =>
       approvals.remember({ reviewCase, request }));
@@ -552,16 +552,15 @@ async function humanReview(
     "Permission review",
     `${reason}\n\nExact ${request.tool} input:\n${formatHumanInput(request.input)}\n\nAllow once?`,
   );
-  if (!allowed) return { block: true, reason: "Denied by user", terminate: true };
+  if (!allowed) return blockToolCall("Denied by user");
   const validationError = validateBeforeAllow?.();
-  if (validationError) return terminalBlock(validationError);
+  if (validationError) return blockToolCall(validationError);
   const locked = lockAllowedInput(event, "Approved");
   if (locked) return locked;
   if (onAllow && !onAllow()) {
     return {
       block: true,
       reason: "Approved capability collided with an existing tool call",
-      terminate: true,
     };
   }
   return;
@@ -800,8 +799,8 @@ function validateFileReviewBoundary(options: {
   return;
 }
 
-function terminalBlock(reason: string) {
-  return { block: true, reason, terminate: true };
+function blockToolCall(reason: string) {
+  return { block: true, reason };
 }
 
 
@@ -821,7 +820,6 @@ function lockAllowedInput(event: ToolCallEvent, label: string) {
     return {
       block: true,
       reason: `${label} input could not be locked: ${error instanceof Error ? error.message : String(error)}`,
-      terminate: true,
     };
   }
 }
@@ -838,7 +836,6 @@ function allowOnce(
     return {
       block: true,
       reason: `${label} capability collided with an existing tool call`,
-      terminate: true,
     };
   }
   return;

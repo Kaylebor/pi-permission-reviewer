@@ -123,7 +123,7 @@ test("remote-shell detection does not cross shell command-list boundaries", () =
   }
 });
 
-test("deny rules remain terminal when commands also contain dataflow", () => {
+test("deny rules remain authoritative when commands also contain dataflow", () => {
   assert.equal(classifyBash("cat ~/.ssh/id_ed25519 | wc -c").action, "block");
   assert.equal(classifyBash("head ~/.aws/credentials > copy.txt").action, "block");
 });

@@ -13,7 +13,6 @@ const PI_PERM_VERSION = "0.1.8";
 export interface PermissionDecision {
   block?: boolean;
   reason?: string;
-  terminate?: boolean;
 }
 
 export type PermissionInspection =
@@ -319,7 +318,6 @@ function validateDecision(value: unknown): PermissionDecision | undefined {
   return {
     ...(decision.block !== undefined ? { block: decision.block } : {}),
     ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
-    ...(decision.terminate !== undefined ? { terminate: decision.terminate } : {}),
   };
 }
 
@@ -358,7 +356,7 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
 }
 
 function blockedDecision(reason: string): PermissionDecision {
-  return { block: true, reason, terminate: true };
+  return { block: true, reason };
 }
 
 function initializationReason(error: unknown): string {

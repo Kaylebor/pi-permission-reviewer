@@ -276,6 +276,35 @@ test("fails closed when a private decision violates the validated contract", asy
   assert.match(String(decision?.reason), /failed to evaluate/);
 });
 
+test("strips inherited termination from pi-perm denials", async () => {
+  const adapter = await createPiPermAdapter(
+    { cwd },
+    fakeDependencies({
+      extension: {
+        createPiPermExtension() {
+          return {
+            state: {
+              cwd,
+              config: {},
+              activeProfile: "workspace",
+              sessionAllows: new Map(),
+              sessionFilesystemAllows: new Map(),
+            },
+            async handleToolCall() {
+              return { block: true, reason: "policy denied", terminate: true };
+            },
+          };
+        },
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    await adapter.handleToolCall({} as any, { cwd } as any),
+    { block: true, reason: "policy denied" },
+  );
+});
+
 test("validates the installed pi-perm 0.1.8 contract", async () => {
   const runtimeBaseDir = mkdtempSync(join(tmpdir(), "pi-perm-adapter-runtime-"));
   const previousConfig = process.env.PI_PERM_USER_CONFIG;
