@@ -77,8 +77,9 @@ Run:
 ```
 
 The interactive menu can add and remove reviewers, change same-level fallback
-order, configure reviewer context and history persistence, edit the additional
-policy or Guardian prompt, or open the complete JSON in Pi's editor.
+order, configure reviewer context, reactive review, and Git boundary
+compatibility, edit the additional policy or Guardian prompt, or open the
+complete JSON in Pi's editor.
 Changes are written atomically, use user-only file permissions on Unix, and take
 effect in the running Pi session.
 
@@ -153,9 +154,35 @@ providers, custom `models.json` providers, and extension-registered providers
 are treated alike. A manually entered model may be unavailable now and become
 usable later after its provider is authenticated.
 
+`boundaryReview` controls two narrow Git preflight compatibility requests. All
+fields are optional when editing JSON; omitted fields use these safe defaults:
+
+```json
+{
+  "boundaryReview": {
+    "gitFsmonitor": true,
+    "gitSshAgent": "review"
+  }
+}
+```
+
+- `gitFsmonitor` enables Git fsmonitor compatibility. macOS adds only the
+  repository's resolved socket path; Linux disables fsmonitor through an
+  invocation-local Git config overlay. It never changes user Git config.
+- `gitSshAgent` is either `"review"` (the default) or `"block"`. `block`
+  makes Git SSH-agent access a deterministic denial; `review` routes it through
+  the reviewer path at level 1 or higher.
+
+These settings never weaken an explicit Sandbox Runtime or `pi-perm` deny.
+Deterministic classification and policy take precedence. The approved Linux
+SSH-agent path disables AF_UNIX isolation for that one invocation because SRT
+cannot filter Unix sockets by pathname there. Docker, Podman, and other local
+service sockets may then permit control beyond the remaining sandbox.
+
 Semantics:
 
-- The command router assigns a minimum level.
+- Commands with proactive or concrete boundary requests receive a minimum
+  review level; commands with no matching rule run contained without a model.
 - Levels may be sparse and are visited in ascending numeric order.
 - Array order breaks ties. Unavailable, failed, or timed-out entries fall
   through to the next tied reviewer; each level accepts at most one assessment.
@@ -247,6 +274,55 @@ reviewer; only `pi-perm` confirmation decisions enter the model chain. A
 reviewer approval of a file operation does not add a persistent `pi-perm`
 allow: it authorizes only that locked Pi tool call.
 
+## Explicit Bash permissions
+
+The registered `bash` tool accepts an optional structured permission request:
+
+```json
+{
+  "command": "tool --input /outside/input --output /outside/result",
+  "permissions": {
+    "read": ["/outside/input"],
+    "write": ["/outside/result"],
+    "unixSockets": ["/run/example.sock"],
+    "sshAgent": true
+  }
+}
+```
+
+Each path must be normalized, absolute, glob-free, no list may contain more
+than 16 paths, and the complete permission object is capped at 4,096
+characters. A request is shown in full before any possibly truncated command
+input in the human prompt, and is bound into the one-use capability. Read-only
+requests enter at level 0; write, Unix-socket, and SSH-agent requests enter at
+level 1. `pi-perm`, classifier, and hardened SRT
+denies remain authoritative, so a reviewer cannot re-allow an explicitly denied
+path or socket.
+
+The default remains contained execution with no extra access. If a contained
+attempt fails, the agent may resubmit the unchanged command with the minimum
+explicit permissions, but this extension never retries a failed command. That
+avoids duplicating partial effects.
+
+On macOS, each requested Unix-socket pathname grants SRT's bundled bind/connect
+access to that pathname. On Linux, SRT disables AF_UNIX isolation for any
+`unixSockets` or `sshAgent` request. That exposes Docker, Podman, and other local
+service sockets and can permit control beyond the remaining sandbox, so this
+consequence is included in the review prompt. `sshAgent` also exposes only the
+current `SSH_AUTH_SOCK` value; the rest of the child environment stays
+sanitized. Local TCP binding is unsupported.
+
+## Git preflight compatibility
+
+Every command starts with frozen contained Sandbox Runtime settings. Recognized
+Git operations may request only the configured preflight compatibility paths:
+`gitFsmonitor` provides the platform-specific fsmonitor handling without
+changing user Git configuration, and `gitSshAgent` either blocks or routes a
+Git SSH-agent request through the reviewer chain. Local binding remains blocked.
+Git detection is a convenience layer over the same frozen per-invocation
+boundary. Other commands use the explicit `permissions` object above rather
+than reusing Git-specific controls.
+
 ## Reactive network review
 
 An approved command remains inside Sandbox Runtime. If it attempts a connection
@@ -284,9 +360,10 @@ denials for common SSH, cloud, container, package-manager, Git credential, Pi,
 Codex, and macOS Keychain paths. These are defense-in-depth controls, not a
 complete secret detector.
 
-This first reactive bridge covers network destinations. Reactive filesystem,
-Unix-socket, and local-binding grants are not implemented yet. A curated and
-user-expandable catalogue of common host-port combinations is intentionally
+The reactive network bridge covers only public-looking HTTPS destinations.
+Filesystem and Unix-socket access is preflight-only through the explicit Bash
+request above; there is no post-failure discovery or automatic replay. A curated
+and user-expandable catalogue of common host-port combinations is intentionally
 deferred until the reactive review path is established.
 
 ## Relationship to existing packages

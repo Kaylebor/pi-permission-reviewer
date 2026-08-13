@@ -28,6 +28,24 @@
   outside this package's execution boundary once its outer call is allowed.
   New integrations should route effects through Pi's guarded tools or an
   equivalent capability-bound sandbox broker.
+- Contained Sandbox Runtime execution is the default. `boundaryReview` enables
+  recognized Git preflight compatibility; deterministic pi-perm, classifier,
+  and SRT denies always take precedence. Linux SSH-agent approval necessarily
+  enables Unix sockets broadly for that exact invocation.
+- Git fsmonitor uses an invocation-local compatibility overlay, while approved
+  Git SSH access has a one-run broad Unix-socket tradeoff. Local binding is
+  unsupported everywhere.
+- The Bash schema exposes explicit `permissions.read`, `permissions.write`,
+  `permissions.unixSockets`, and `permissions.sshAgent` preflight requests.
+  Keep them exact-input-bound, one-use, capped, and subordinate to deterministic
+  denies. Never infer them from failed-command text or retry a failed command.
+- SRT 0.0.71 grants bind and connect together for an exact macOS Unix-socket
+  pathname and disables AF_UNIX isolation on Linux. Present the resulting
+  Docker, Podman, and local-service control risk to reviewers; it does not
+  permit local TCP binding. Such requests start at level 1 or higher.
+- No public inter-extension integration API exists. Keep the Bash permission
+  contract internal to this package's registered execution boundary until a
+  separate versioned broker has concrete consumers and adversarial tests.
 
 ## Dependency and integration invariants
 

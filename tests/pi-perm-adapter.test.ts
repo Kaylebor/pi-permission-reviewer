@@ -148,7 +148,7 @@ test("confirmation inspection uses a private sentinel", async () => {
   const adapter = await createPiPermAdapter({ cwd }, dependencies);
   assert.deepEqual(
     await adapter.inspectToolCall({ toolName: "read" } as any, { cwd, ui: {} } as any),
-    { kind: "confirm", reason: "pi-perm requested confirmation for this file operation" },
+    { kind: "confirm", reason: "confirm" },
   );
   assert.equal(continuedAfterPrompt, false);
 });

@@ -7,11 +7,11 @@ test("known read-only commands skip model review", () => {
   assert.equal(classifyBash("head -n 10 src/index.ts").action, "skip");
 });
 
-test("simple unknown commands start at level zero", () => {
+test("simple unknown commands run inside the sandbox without model review", () => {
   assert.deepEqual(classifyBash("cargo test"), {
-    action: "review",
+    action: "skip",
     minimumLevel: 0,
-    reason: "uncategorized simple command",
+    reason: "no proactive rule matched; sandbox boundary remains authoritative",
   });
 });
 

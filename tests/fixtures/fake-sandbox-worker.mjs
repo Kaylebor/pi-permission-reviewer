@@ -15,6 +15,19 @@ process.on("message", (message) => {
       process.disconnect();
       return;
     }
+    if (message.command === "git-env") {
+      send({
+        type: "output",
+        data: Buffer.from(JSON.stringify({
+          count: process.env.GIT_CONFIG_COUNT,
+          key: process.env.GIT_CONFIG_KEY_0,
+          value: process.env.GIT_CONFIG_VALUE_0,
+        })).toString("base64"),
+      });
+      send({ type: "result", exitCode: 0 });
+      process.disconnect();
+      return;
+    }
     if (message.command === "wait") {
       send({
         type: "network-request",

@@ -8,6 +8,12 @@ worker, and Boolean network responses. No bash call reaches the registered
 executor without consuming a capability bound to its exact input, CWD, session
 epoch, configuration generation, and frozen sandbox settings.
 
+Contained execution is the default: each authorized command uses frozen SRT
+settings. A Bash call may include exact structured filesystem, Unix-socket, or
+SSH-agent preflight requests, and recognized Git commands may derive narrowly
+scoped compatibility requests. Deterministic `pi-perm`, classifier, and SRT
+denies remain authoritative; neither path can override a deterministic denial.
+
 The review plane owns provider-neutral context evidence and tool-less model
 calls. A `ContextLedger` follows Pi's `context` snapshots and finalized
 `message_end` events. It emits either bounded redacted transcript evidence or
@@ -31,6 +37,7 @@ early turn termination—form the authority boundary.
 Pi tool_call
   -> pi-perm deterministic allow / authoritative block / confirmation
   -> bash classifier or built-in file-tool minimum level
+  -> optional explicit Bash permissions: validate -> minimum review level
   -> review ladder / human fallback
   -> immutable ReviewCase
   -> bash: one-use ApprovalCapability -> registered executor -> SRT worker
@@ -38,6 +45,7 @@ Pi tool_call
        -> off-list public HTTPS: reactive review ladder
        -> structured NetworkDecision
        -> Boolean allow/deny IPC
+       -> explicit or recognized Git preflight capability request
   -> read/write/edit: locked exact input -> Pi built-in executor
 ```
 
@@ -66,6 +74,21 @@ present in that local history and is not duplicated. Availability fallbacks and
 higher-level escalation reviewers keep their configured effort and receive the
 full evidence packet when they have not seen the case.
 
+`boundaryReview` defaults to `{ gitFsmonitor: true, gitSshAgent: "review" }`.
+Recognized Git commands can receive platform-specific fsmonitor compatibility;
+on Linux it is an invocation-local `core.fsmonitor=false` overlay. An approved
+SSH-agent Git operation starts at level 1 and receives Linux's broad Unix-socket
+switch only for that exact run. This disables AF_UNIX isolation and can expose
+container engines and other local control sockets. `gitFsmonitor: false`
+disables the compatibility path, and
+`gitSshAgent: "block"` is authoritative. Local TCP binding remains unsupported.
+Other commands request explicit structured preflight capabilities; they do not
+reuse Git-specific settings as a generic sandbox-broadening API. Explicit read
+requests start at level 0, while write/socket/SSH requests start at level 1.
+They are materialized before execution into the immutable one-use capability.
+The complete permission object is capped and displayed before truncated command
+input during human review. There is no post-failure retry path.
+
 Private pi-perm imports are isolated in `src/pi-perm-adapter.ts`. The adapter
 requires exactly version 0.1.8 and validates every private state/module shape it
 uses. Dependency upgrades therefore require an explicit adapter compatibility
@@ -73,5 +96,6 @@ review rather than relying on semver for an unpublished internal API.
 
 The current reactive bridge covers public-looking HTTPS destinations on port
 443. It cannot inspect HTTP method, path, request body, or resolved DNS address,
-so it is not credential-aware authorization. Filesystem, Unix-socket, local
-binding, and curated known-host capabilities remain separate future work.
+so it is not credential-aware authorization. Explicit filesystem and
+Unix-socket requests are preflight-only and separate from that live bridge;
+reactive local binding and curated known-host capabilities remain future work.

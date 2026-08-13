@@ -14,10 +14,16 @@ import {
 import { classifyBash } from "../src/classifier.ts";
 import { handleConfigCommand } from "../src/config-ui.ts";
 import {
+  DEFAULT_BOUNDARY_REVIEW,
   DEFAULT_REACTIVE_REVIEW,
   DEFAULT_REVIEW_CONTEXT,
   loadConfig,
 } from "../src/config.ts";
+import {
+  applyGitBoundaryPlan,
+  detectGitBoundary,
+  gitBoundaryConflictsWithDeny,
+} from "../src/git-boundary.ts";
 import { ContextLedger, type ReviewContextEvidence } from "../src/context-ledger.ts";
 import { lockToolInput } from "../src/input-lock.ts";
 import { runReviewLevels } from "../src/levels.ts";
@@ -33,13 +39,37 @@ import {
   transcriptRetainsEvidence,
   type ReviewerTranscript,
 } from "../src/reviewer.ts";
-import type { ApprovalCapability, NetworkDecision, ReviewCase } from "../src/review-types.ts";
+import type {
+  ApprovalCapability,
+  NetworkDecision,
+  ReviewCase,
+} from "../src/review-types.ts";
 import type {
   ReviewerConfig,
   ReactiveReviewConfig,
   ReviewRequest,
 } from "../src/types.ts";
-import type { ThinkingLevel } from "@earendil-works/pi-ai";
+import { Type, type ThinkingLevel } from "@earendil-works/pi-ai";
+import {
+  materializeExplicitBoundaries,
+  planExplicitBoundaries,
+} from "../src/explicit-boundary.ts";
+
+const bashPermissionSchema = Type.Optional(Type.Object({
+  read: Type.Optional(Type.Array(Type.String({ description: "Normalized absolute path" }), { maxItems: 16 })),
+  write: Type.Optional(Type.Array(Type.String({ description: "Normalized absolute path" }), { maxItems: 16 })),
+  unixSockets: Type.Optional(Type.Array(Type.String({ description: "Normalized absolute socket path; grants all Unix sockets on Linux" }), { maxItems: 16 })),
+  sshAgent: Type.Optional(Type.Unsafe<boolean>({
+    enum: [true, false],
+    description: "Expose SSH_AUTH_SOCK; grants all Unix sockets on Linux",
+  })),
+}, { additionalProperties: false }));
+
+const guardedBashSchema = Type.Object({
+  command: Type.String({ description: "Bash command to execute" }),
+  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
+  permissions: bashPermissionSchema,
+}, { additionalProperties: false });
 
 export default async function permissionReviewer(pi: ExtensionAPI) {
   let loaded = loadConfig();
@@ -76,9 +106,12 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   const bashTool = createBashToolDefinition(permissions.initialCwd);
   pi.registerTool({
     ...bashTool,
+    parameters: guardedBashSchema,
+    description: `${bashTool.description} Commands run in a contained sandbox by default. If exact additional access is required, resubmit the unchanged command with structured permissions.`,
     promptGuidelines: [
       ...(bashTool.promptGuidelines ?? []),
       "Network connections may pause for permission review. Avoid short application-level wall-clock timeouts (for example curl --max-time), or leave those application-level deadlines enough review headroom when redirects or new hosts are possible.",
+      "Use bash permissions.read, permissions.write, permissions.unixSockets, or permissions.sshAgent when a contained command needs additional filesystem or Unix-socket access. Resubmit the exact command, use normalized absolute paths, and request only the minimum necessary access. Linux Unix-socket and SSH-agent requests grant all Unix sockets for that one invocation.",
     ],
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
       if (activeSandboxWorkers >= 4) {
@@ -103,13 +136,14 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         : executionController.signal;
       const invocationTool = createBashToolDefinition(capability.reviewCase.cwd, {
         operations: {
-          exec: (command, cwd, options) =>
+          exec: async (command, cwd, options) =>
             runReactiveSandbox({
               toolCallId,
               caseId: capability.reviewCase.id,
               command,
               cwd,
-              settings: capability.reviewCase.sandboxSettings as Record<string, unknown>,
+              settings: capability.reviewCase.sandboxSettings,
+              environment: capability.executionEnvironment,
               onData: options.onData,
               onNetworkRequest: (destination, reviewSignal) =>
                 reviewNetworkRequest(
@@ -135,7 +169,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
               signal: options.signal
                 ? AbortSignal.any([options.signal, combinedSignal])
                 : combinedSignal,
-              ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
+              ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
             }),
         },
       });
@@ -143,7 +177,10 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       try {
         return await invocationTool.execute(
           toolCallId,
-          params,
+          {
+            command: params.command,
+            ...(params.timeout === undefined ? {} : { timeout: params.timeout }),
+          },
           signal,
           onUpdate,
           ctx,
@@ -381,32 +418,41 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     if (classification.action === "block") {
       return blockToolCall(classification.reason);
     }
+    const bashInputLock = lockAllowedInput(event, "Review-pending");
+    if (bashInputLock) return bashInputLock;
 
-    let confirmationRequested = false;
-    const permissionDecision = await permissions.handleToolCall(event, {
-      ...ctx,
-      ui: {
-        ...ctx.ui,
-        confirm: async () => {
-          confirmationRequested = true;
-          return false;
-        },
-        select: async () => {
-          confirmationRequested = true;
-          return undefined;
-        },
-      },
-    } as ExtensionContext);
-    if (permissionDecision?.block && !confirmationRequested) {
-      return permissionDecision;
+    let explicitPlan: ReturnType<typeof planExplicitBoundaries>;
+    try {
+      explicitPlan = planExplicitBoundaries(
+        (event.input as { permissions?: unknown }).permissions,
+      );
+    } catch (error) {
+      return blockToolCall(
+        `Invalid explicit permission request: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const permissionInspection = await permissions.inspectToolCall(event, ctx);
+    if (permissionInspection.kind === "block") {
+      return permissionInspection.decision;
     }
     const request: ReviewRequest = {
       tool: event.toolName,
       input: event.input as Record<string, unknown>,
       cwd: ctx.cwd,
-      minimumLevel: classification.minimumLevel,
-      policyReason: permissionDecision?.reason ?? classification.reason,
+      minimumLevel: Math.max(
+        classification.minimumLevel,
+        explicitPlan?.minimumLevel ?? 0,
+      ),
+      policyReason: permissionInspection.kind === "confirm"
+        ? permissionInspection.reason
+        : classification.reason,
     };
+    if (explicitPlan) {
+      request.policyReason = [request.policyReason, explicitPlan.policyReason]
+        .filter(Boolean)
+        .join("; ");
+    }
     const reviewConfig = loaded;
     const reviewGeneration = configGeneration;
     const reviewEpoch = sessionEpoch;
@@ -418,6 +464,57 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     }
     if (configGeneration !== reviewGeneration || sessionEpoch !== reviewEpoch) {
       return blockToolCall("The permission boundary changed while this action was being prepared; retry the action");
+    }
+    const boundaryConfig = reviewConfig.config.boundaryReview ?? DEFAULT_BOUNDARY_REVIEW;
+    const gitPlan = await detectGitBoundary(command, ctx.cwd);
+    if (configGeneration !== reviewGeneration || sessionEpoch !== reviewEpoch) {
+      return blockToolCall("The permission boundary changed while Git capabilities were being resolved; retry the action");
+    }
+    let executionEnvironment: Record<string, string> | undefined;
+    const boundaries: NonNullable<ApprovalCapability["boundaries"]>[number][] = [];
+    if (gitPlan) {
+      if (gitPlan.sshAgentRequest && boundaryConfig.gitSshAgent === "block") {
+        return blockToolCall("Git SSH-agent access is disabled by boundaryReview.gitSshAgent");
+      }
+      if (gitBoundaryConflictsWithDeny(sandboxSettings, gitPlan, {
+        enableFsmonitor: boundaryConfig.gitFsmonitor,
+        grantSshAgent: gitPlan.sshAgentRequest !== undefined,
+        cwd: ctx.cwd,
+      })) {
+        return blockToolCall("The requested Git socket capability conflicts with an explicit sandbox deny");
+      }
+      const materialized = applyGitBoundaryPlan(sandboxSettings, gitPlan, {
+        enableFsmonitor: boundaryConfig.gitFsmonitor,
+        grantSshAgent: gitPlan.sshAgentRequest !== undefined,
+      });
+      sandboxSettings = materialized.settings;
+      if (Object.keys(materialized.environment).length > 0) {
+        executionEnvironment = materialized.environment;
+      }
+      if (gitPlan.sshAgentRequest) {
+        boundaries.push(gitPlan.sshAgentRequest);
+        request.minimumLevel = Math.max(request.minimumLevel, 1);
+        request.policyReason = `${request.policyReason}; ${gitPlan.sshAgentRequest.reason}. On Linux this disables AF_UNIX isolation for the invocation, exposing Docker, Podman, and other local service sockets and potentially permitting control beyond the sandbox.`;
+      }
+    }
+    if (explicitPlan) {
+      try {
+        const materialized = materializeExplicitBoundaries(
+          sandboxSettings,
+          explicitPlan,
+          { cwd: ctx.cwd },
+        );
+        sandboxSettings = materialized.settings;
+        executionEnvironment = {
+          ...(executionEnvironment ?? {}),
+          ...materialized.environment,
+        };
+        boundaries.push(...explicitPlan.boundaries);
+      } catch (error) {
+        return blockToolCall(
+          `Explicit permission request cannot be granted: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
     let reviewCase: ReviewCase;
     try {
@@ -440,26 +537,47 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     } catch (error) {
       return blockToolCall(`Could not snapshot the permission boundary: ${error instanceof Error ? error.message : String(error)}`);
     }
-    if (!permissionDecision && classification.action === "skip") {
-      return allowOnce(event, approvals, { reviewCase, request }, "Skipped");
+    const capabilityExtras = {
+      ...(executionEnvironment ? { executionEnvironment } : {}),
+      ...(boundaries.length ? { boundaries } : {}),
+    };
+    const contextOptions = reviewConfig.config.reviewContext ?? DEFAULT_REVIEW_CONTEXT;
+    const evidence = contextLedger.buildEvidence(contextOptions);
+    const rememberCapability = (extra: Partial<ApprovalCapability> = {}): boolean => {
+      const remembered = approvals.remember({
+        reviewCase,
+        request,
+        ...capabilityExtras,
+        ...extra,
+      });
+      if (remembered) caseEvidence.set(reviewCase.id, evidence);
+      return remembered;
+    };
+    if (
+      permissionInspection.kind === "allow" &&
+      classification.action === "skip" &&
+      boundaries.length === 0
+    ) {
+      caseEvidence.set(reviewCase.id, evidence);
+      const result = allowOnce(event, approvals, { reviewCase, request, ...capabilityExtras }, "Sandbox-contained");
+      if (result?.block) caseEvidence.delete(reviewCase.id);
+      return result;
     }
 
     if (classification.action === "human") {
       return humanReview(event, request, ctx, undefined, () =>
-        approvals.remember({ reviewCase, request }));
+        rememberCapability());
     }
     const reviewSignal = ctx.signal
       ? AbortSignal.any([ctx.signal, reviewerLifecycle.signal])
       : reviewerLifecycle.signal;
-    const contextOptions = reviewConfig.config.reviewContext ?? DEFAULT_REVIEW_CONTEXT;
-    const evidence = contextLedger.buildEvidence(contextOptions);
     if (!reviewConfig.valid) {
       return humanReview(
         event,
         request,
         ctx,
         "Reviewer configuration is invalid; automatic approval is disabled",
-        () => approvals.remember({ reviewCase, request }),
+        () => rememberCapability(),
       );
     }
     const reviewed = await runReviewLevels({
@@ -509,6 +627,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       const result = allowOnce(event, approvals, {
         reviewCase,
         request,
+        ...capabilityExtras,
         ...(reviewer ? { reviewer } : {}),
         ...(decided?.assessment ? { assessment: decided.assessment } : {}),
       }, "Approved");
@@ -520,7 +639,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       return blockToolCall(reviewed.reason);
     }
     const result = await humanReview(event, request, ctx, reviewed.reason, () =>
-      approvals.remember({ reviewCase, request }));
+      rememberCapability());
     if (result?.block) cleanupCaseState(reviewCase.id, reviewerTranscripts, caseEvidence);
     return result;
   });
@@ -565,7 +684,7 @@ async function humanReview(
   }
   const allowed = await ctx.ui.confirm(
     "Permission review",
-    `${reason}\n\nExact ${request.tool} input:\n${formatHumanInput(request.input)}\n\nAllow once?`,
+    `${reason}${formatExplicitPermissions(request.input)}\n\nExact ${request.tool} input:\n${formatHumanInput(request.input)}\n\nAllow once?`,
   );
   if (!allowed) return blockToolCall("Denied by user");
   const validationError = validateBeforeAllow?.();
@@ -826,6 +945,11 @@ function formatHumanInput(input: Record<string, unknown>): string {
   return rendered.length <= limit
     ? rendered
     : `${rendered.slice(0, limit)}\n[truncated; deny and inspect the complete action before approving]`;
+}
+
+function formatExplicitPermissions(input: Record<string, unknown>): string {
+  if (!Object.hasOwn(input, "permissions")) return "";
+  return `\n\nRequested extra boundaries (complete):\n${JSON.stringify(input.permissions, null, 2)}`;
 }
 
 function lockAllowedInput(event: ToolCallEvent, label: string) {

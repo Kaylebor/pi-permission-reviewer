@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   ApprovalCapability,
+  BoundaryRequest,
   ReviewCase,
 } from "./review-types.ts";
 import type { ReviewRequest } from "./types.ts";
@@ -246,6 +247,16 @@ function snapshotCapability(capability: ApprovalCapability): ApprovalCapability 
     ...(capability.assessment === undefined
       ? {}
       : { assessment: freezeJsonRecord(capability.assessment, "assessment") as unknown as ApprovalCapability["assessment"] }),
+    ...(capability.executionEnvironment === undefined
+      ? {}
+      : { executionEnvironment: freezeJsonRecord(capability.executionEnvironment, "execution environment") as Readonly<Record<string, string>> }),
+    ...(capability.boundaries === undefined
+      ? {}
+      : {
+          boundaries: Object.freeze(capability.boundaries.map((boundary) =>
+            freezeJsonRecord(boundary, "boundary request") as unknown as Readonly<BoundaryRequest>
+          )),
+        }),
   };
   return Object.freeze(result);
 }

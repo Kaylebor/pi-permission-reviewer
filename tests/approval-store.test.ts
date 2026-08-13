@@ -123,6 +123,29 @@ test("remember is first-wins and retains a private capability snapshot", () => {
   }
 });
 
+test("capability snapshots freeze explicit boundaries and execution environment", () => {
+  const store = new ApprovalStore();
+  const source = capability();
+  const boundaries = [{
+    kind: "filesystem-read" as const,
+    resource: "/outside/input",
+    phase: "preflight" as const,
+    reason: "explicit request",
+  }];
+  const executionEnvironment = { SSH_AUTH_SOCK: "/tmp/agent.sock" };
+  assert.equal(store.remember({ ...source, boundaries, executionEnvironment }), true);
+  boundaries[0]!.resource = "/changed";
+  executionEnvironment.SSH_AUTH_SOCK = "/changed.sock";
+  const consumed = store.consume(invocation());
+  assert.equal(consumed.ok, true);
+  if (!consumed.ok) return;
+  assert.equal(consumed.capability.boundaries?.[0]?.resource, "/outside/input");
+  assert.equal(consumed.capability.executionEnvironment?.SSH_AUTH_SOCK, "/tmp/agent.sock");
+  assert.ok(Object.isFrozen(consumed.capability.boundaries));
+  assert.ok(Object.isFrozen(consumed.capability.boundaries?.[0]));
+  assert.ok(Object.isFrozen(consumed.capability.executionEnvironment));
+});
+
 test("consume fails closed for every bound invocation field", () => {
   const checks = [
     { tool: "shell" },

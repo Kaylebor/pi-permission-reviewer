@@ -30,10 +30,15 @@ export const DEFAULT_REACTIVE_REVIEW = {
   reasoning: "one-lower",
   floor: "low",
 } as const;
+export const DEFAULT_BOUNDARY_REVIEW = {
+  gitFsmonitor: true,
+  gitSshAgent: "review",
+} as const;
 const DEFAULT_CONFIG: PermissionReviewerConfig = {
   reviewers: [],
   reviewContext: DEFAULT_REVIEW_CONTEXT,
   reactiveReview: DEFAULT_REACTIVE_REVIEW,
+  boundaryReview: DEFAULT_BOUNDARY_REVIEW,
 };
 const MAX_GUARDIAN_PROMPT_BYTES = 32 * 1024;
 
@@ -108,14 +113,30 @@ export function validateConfig(value: unknown): PermissionReviewerConfig {
   }
   const reviewContext = validateReviewContext(value.reviewContext);
   const reactiveReview = validateReactiveReview(value.reactiveReview);
+  const boundaryReview = validateBoundaryReview(value.boundaryReview);
   const guardianPromptFile = validateGuardianPromptFile(value.guardianPromptFile);
   return {
     reviewers,
     reviewContext,
     reactiveReview,
+    boundaryReview,
     ...(value.policy ? { policy: value.policy } : {}),
     ...(guardianPromptFile ? { guardianPromptFile } : {}),
   };
+}
+
+function validateBoundaryReview(value: unknown): NonNullable<PermissionReviewerConfig["boundaryReview"]> {
+  if (value === undefined) return { ...DEFAULT_BOUNDARY_REVIEW };
+  if (!isRecord(value)) throw new Error("boundaryReview must be an object");
+  const gitFsmonitor = value.gitFsmonitor ?? DEFAULT_BOUNDARY_REVIEW.gitFsmonitor;
+  const gitSshAgent = value.gitSshAgent ?? DEFAULT_BOUNDARY_REVIEW.gitSshAgent;
+  if (typeof gitFsmonitor !== "boolean") {
+    throw new Error("boundaryReview.gitFsmonitor must be a boolean");
+  }
+  if (gitSshAgent !== "review" && gitSshAgent !== "block") {
+    throw new Error("boundaryReview.gitSshAgent must be review or block");
+  }
+  return { gitFsmonitor, gitSshAgent };
 }
 
 function validateReactiveReview(value: unknown): NonNullable<PermissionReviewerConfig["reactiveReview"]> {

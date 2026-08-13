@@ -35,9 +35,27 @@ export interface ReviewCase {
   sandboxSettings: Readonly<Record<string, unknown>>;
 }
 
+export type BoundaryKind =
+  | "network-destination"
+  | "filesystem-read"
+  | "filesystem-write"
+  | "unix-socket"
+  | "ssh-agent";
+
+export interface BoundaryRequest {
+  kind: BoundaryKind;
+  resource: string;
+  phase: "preflight" | "reactive";
+  reason: string;
+  platform?: NodeJS.Platform;
+}
+
 export interface ApprovalCapability {
   reviewCase: ReviewCase;
   request: ReviewRequest;
   reviewer?: ReviewerConfig;
   assessment?: ReviewAssessment;
+  /** Environment values exposed only to this one approved invocation. */
+  executionEnvironment?: Readonly<Record<string, string>>;
+  boundaries?: readonly Readonly<BoundaryRequest>[];
 }

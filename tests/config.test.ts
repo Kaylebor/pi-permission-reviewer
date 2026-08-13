@@ -32,6 +32,29 @@ test("accepts tied and sparse reviewer levels", () => {
     reasoning: "one-lower",
     floor: "low",
   });
+  assert.deepEqual(config.boundaryReview, {
+    gitFsmonitor: true,
+    gitSshAgent: "review",
+  });
+});
+
+test("validates boundary review settings and fills their safe defaults", () => {
+  const config = validateConfig({
+    reviewers: [],
+    boundaryReview: { gitSshAgent: "block" },
+  });
+  assert.deepEqual(config.boundaryReview, {
+    gitFsmonitor: true,
+    gitSshAgent: "block",
+  });
+  assert.throws(
+    () => validateConfig({ reviewers: [], boundaryReview: { gitFsmonitor: 1 } }),
+    /boundaryReview\.gitFsmonitor must be a boolean/,
+  );
+  assert.throws(
+    () => validateConfig({ reviewers: [], boundaryReview: { gitSshAgent: "allow" } }),
+    /boundaryReview\.gitSshAgent must be review or block/,
+  );
 });
 
 test("validates provider-neutral review context settings", () => {

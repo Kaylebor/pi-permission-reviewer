@@ -3,6 +3,13 @@
 This document records design ideas, not supported APIs or current security
 guarantees.
 
+The Bash tool currently accepts explicit structured preflight permissions, but
+no public inter-extension integration API exists. This extension owns its
+execution path; another extension cannot broaden a sandbox or consume an
+approval. Any future cross-extension capability request must begin as an
+internal, versioned interface with adversarial tests before a public contract is
+considered.
+
 ## Current state
 
 Pi composes extensions ambiently. Each loaded extension may register a
@@ -45,6 +52,7 @@ computing base and can bypass this gate after its outer tool call is allowed.
 A future composition contract could let cooperative extensions:
 
 - declare the effects and capabilities they intend to expose;
+- request an explicit, narrowly structured preflight capability;
 - ask whether a structured Pi tool action is admissible without duplicating
   pi-perm state;
 - execute approved OS effects through the same immutable capability and sandbox
@@ -78,11 +86,12 @@ direct extension-side effects safe.
 
 ### 2. Process-local cooperative broker
 
-This package could publish a versioned process-local registry, potentially via
-`Symbol.for(...)`, so independently loaded extensions can discover one active
-broker without importing its private state. Registration would need duplicate
-owner detection, version negotiation, explicit disposal on reload, bounded
-metadata, and fail-closed behavior when a required broker is absent.
+This package could first define a versioned internal broker interface behind its
+own execution boundary. It is not a public package API, process-global registry,
+or a general inter-extension approval service. Any later cooperative discovery
+mechanism would need duplicate-owner detection, version negotiation, explicit
+disposal on reload, bounded metadata, fail-closed behavior when a required
+broker is absent, and an explicit decision to widen the supported API surface.
 
 The broker should avoid an API shaped like `approve(input): boolean`. A safer
 flow is:

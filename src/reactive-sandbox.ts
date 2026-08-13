@@ -26,7 +26,10 @@ export async function runReactiveSandbox(options: {
   toolCallId: string;
   command: string;
   cwd: string;
-  settings: Record<string, unknown>;
+  /** Cloned before spawning so execution cannot observe caller mutation. */
+  settings: Readonly<Record<string, unknown>>;
+  /** Sanitized, immutable overlay for the worker and sandboxed child. */
+  environment?: Readonly<NodeJS.ProcessEnv>;
   onData(data: Buffer): void;
   /**
    * The caller owns eligibility, policy, reviewer, and human decisions. This
@@ -42,6 +45,7 @@ export async function runReactiveSandbox(options: {
   /** Stable ReviewCase id when available; toolCallId remains a safe fallback. */
   caseId?: string;
   signal?: AbortSignal;
+  /** Pi's public bash timeout, in seconds. */
   timeout?: number;
   workerPath?: string;
   nodeBinary?: string;
@@ -49,13 +53,16 @@ export async function runReactiveSandbox(options: {
   networkReviewTimeoutMs?: number;
 }): Promise<{ exitCode: number | null }> {
   if (options.signal?.aborted) throw new Error("aborted");
+  const settings = immutableSettings(options.settings);
+  const environment = immutableWorkerEnvironment(options.environment);
+  const timeoutMs = requestedTimeoutMs(options.timeout);
   const worker = spawn(
     options.nodeBinary ?? process.env.PI_PERMISSION_REVIEWER_NODE ?? "node",
     [options.workerPath ?? fileURLToPath(new URL("./sandbox-worker.mjs", import.meta.url))],
     {
       cwd: options.cwd,
       detached: process.platform !== "win32",
-      env: sanitizedEnvironment(process.env),
+      env: environment,
       stdio: ["ignore", "ignore", "pipe", "ipc"],
       windowsHide: true,
     },
@@ -327,12 +334,53 @@ export async function runReactiveSandbox(options: {
       toolCallId: options.toolCallId,
       command: options.command,
       cwd: options.cwd,
-      settings: options.settings,
-      ...(options.timeout !== undefined
-        ? { timeoutMs: Math.min(options.timeout * 1_000, 2_147_483_647) }
-        : {}),
+      settings,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     });
   });
+}
+
+function requestedTimeoutMs(timeout: number | undefined): number | undefined {
+  if (timeout === undefined) return;
+  const value = timeout * 1_000;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error("timeout must be positive and finite");
+  }
+  return Math.min(value, 2_147_483_647);
+}
+
+function immutableSettings(value: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  try {
+    return deepFreeze(structuredClone(value));
+  } catch {
+    throw new Error("sandbox settings must be structured-cloneable");
+  }
+}
+
+export function immutableWorkerEnvironment(
+  overlay: Readonly<NodeJS.ProcessEnv> | undefined,
+): NodeJS.ProcessEnv {
+  const explicit = sanitizedEnvironment(overlay ?? {});
+  if (typeof overlay?.SSH_AUTH_SOCK === "string" && overlay.SSH_AUTH_SOCK) {
+    explicit.SSH_AUTH_SOCK = overlay.SSH_AUTH_SOCK;
+  }
+  for (const [key, value] of Object.entries(overlay ?? {})) {
+    if (
+      typeof value === "string" &&
+      (key === "GIT_CONFIG_COUNT" || /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key))
+    ) explicit[key] = value;
+  }
+  return Object.freeze({
+    ...sanitizedEnvironment(process.env),
+    ...explicit,
+  });
+}
+
+function deepFreeze<T>(value: T, seen = new Set<object>()): T {
+  if (typeof value !== "object" || value === null || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return Object.freeze(value);
 }
 
 function denyNetworkDecision(

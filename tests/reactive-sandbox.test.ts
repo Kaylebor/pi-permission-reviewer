@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   canonicalizeNetworkDestination,
   hardenSandboxSettings,
+  immutableWorkerEnvironment,
   runReactiveSandbox,
   sanitizedEnvironment,
 } from "../src/reactive-sandbox.ts";
@@ -161,6 +162,45 @@ test("worker environment strips common secret-bearing variables", () => {
       LANG: "C",
     },
   );
+});
+
+test("only an explicit SSH-agent overlay crosses the worker boundary", () => {
+  const inherited = process.env.SSH_AUTH_SOCK;
+  try {
+    process.env.SSH_AUTH_SOCK = "/private/tmp/inherited-agent.sock";
+    assert.equal(immutableWorkerEnvironment({}).SSH_AUTH_SOCK, undefined);
+    assert.equal(
+      immutableWorkerEnvironment({ SSH_AUTH_SOCK: "/private/tmp/approved-agent.sock" })
+        .SSH_AUTH_SOCK,
+      "/private/tmp/approved-agent.sock",
+    );
+  } finally {
+    if (inherited === undefined) delete process.env.SSH_AUTH_SOCK;
+    else process.env.SSH_AUTH_SOCK = inherited;
+  }
+});
+
+test("an explicit invocation-local Git config overlay reaches the worker", async () => {
+  const output: Buffer[] = [];
+  await runReactiveSandbox({
+    toolCallId: "git-env",
+    command: "git-env",
+    cwd: process.cwd(),
+    settings: {},
+    workerPath,
+    environment: {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.fsmonitor",
+      GIT_CONFIG_VALUE_0: "false",
+    },
+    onData: (data) => output.push(data),
+    onNetworkRequest: async () => networkDecision("deny", "policy", "git-env"),
+  });
+  assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
+    count: "1",
+    key: "core.fsmonitor",
+    value: "false",
+  });
 });
 
 test("network destinations use one canonical representation", () => {

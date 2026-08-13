@@ -16,6 +16,7 @@ export interface PermissionReviewerConfig {
   guardianPromptFile?: string;
   reviewContext?: ReviewContextConfig;
   reactiveReview?: ReactiveReviewConfig;
+  boundaryReview?: BoundaryReviewConfig;
 }
 
 export type ReactiveReasoning =
@@ -27,6 +28,13 @@ export type ReactiveReasoning =
 export interface ReactiveReviewConfig {
   reasoning: ReactiveReasoning;
   floor: ThinkingLevel;
+}
+
+export interface BoundaryReviewConfig {
+  /** Enable invocation-local Git fsmonitor compatibility. */
+  gitFsmonitor: boolean;
+  /** How a reviewable request for Git's SSH agent is handled. */
+  gitSshAgent: "review" | "block";
 }
 
 export interface ReviewContextConfig {

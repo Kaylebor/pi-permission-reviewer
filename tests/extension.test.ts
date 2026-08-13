@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Value } from "typebox/value";
 import permissionReviewer, {
   isEligibleReactiveDestination,
   resolveReactiveReasoning,
@@ -20,6 +21,88 @@ function assertContinuableBlock(result: unknown): asserts result is {
   assert.equal(decision.block, true);
   assert.equal(Object.hasOwn(decision, "terminate"), false);
 }
+
+test("registered bash schema exposes strict structured permission requests", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  let registered: { parameters: unknown; promptGuidelines?: string[] } | undefined;
+  await permissionReviewer({
+    events: { emit() {} },
+    registerTool(tool: { parameters: unknown; promptGuidelines?: string[] }) {
+      registered = tool;
+    },
+    registerCommand() {},
+    on() {},
+  } as any);
+  assert.ok(registered);
+  assert.equal(Value.Check(registered.parameters as any, {
+    command: "cat /outside/input",
+    permissions: { read: ["/outside/input"] },
+  }), true);
+  assert.equal(Value.Check(registered.parameters as any, {
+    command: "cat /outside/input",
+    permissions: { sshAgent: "true" },
+  }), false);
+  assert.equal(Value.Check(registered.parameters as any, {
+    command: "pwd",
+    permissions: { unknown: true },
+  }), false);
+  assert.match(registered.promptGuidelines?.join("\n") ?? "", /Use bash permissions\.read/);
+});
+
+test("an explicit read request forces level-zero review and stays in the bound input", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const reviewerConfig = join(runtime, "reviewers.json");
+  writeFileSync(reviewerConfig, JSON.stringify({
+    reviewers: [{ level: 0, model: "test/reviewer" }],
+  }));
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  await permissionReviewer({
+    events: { emit() {} },
+    registerTool() {},
+    registerCommand() {},
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  } as any);
+  let payload: any;
+  const event = {
+    toolName: "bash",
+    toolCallId: "explicit-read",
+    input: {
+      command: "cat /outside/input",
+      permissions: { read: ["/outside/input"] },
+    },
+  };
+  const result = await handlers.get("tool_call")!(event, {
+    cwd: process.cwd(),
+    hasUI: false,
+    ui: {},
+    modelRegistry: {
+      find: () => ({ provider: "test", id: "reviewer" }),
+      hasConfiguredAuth: () => true,
+      complete: async (_model: unknown, context: any) => {
+        payload = JSON.parse(context.messages.at(-1).content);
+        return {
+          stopReason: "stop",
+          content: [{ type: "text", text: '{"decision":"allow","reason":"bounded read"}' }],
+        };
+      },
+    },
+  });
+  assert.equal(result, undefined);
+  assert.equal(payload.request.minimumLevel, 0);
+  assert.deepEqual(payload.request.input.permissions, { read: ["/outside/input"] });
+  assert.throws(() => event.input.permissions.read.push("/outside/other"), TypeError);
+});
 
 test("reactive continuation lowers only above the configured floor", () => {
   const config = { reasoning: "one-lower" as const, floor: "low" as const };
@@ -168,7 +251,7 @@ test("a deterministic block cannot spoof the confirmation protocol", async () =>
   );
 });
 
-test("a skipped command is locked against later handler mutation", async () => {
+test("an uncategorized contained command skips review and is locked against mutation", async () => {
   const runtime = mkdtempSync(
     join(tmpdir(), "pi-permission-reviewer-runtime-"),
   );
@@ -189,7 +272,7 @@ test("a skipped command is locked against later handler mutation", async () => {
   const event = {
     toolName: "bash",
     toolCallId: "known-safe",
-    input: { command: "pwd" },
+    input: { command: "cargo test" },
   };
   const result = await handlers.get("tool_call")!(event, {
     cwd: process.cwd(),
@@ -200,6 +283,16 @@ test("a skipped command is locked against later handler mutation", async () => {
   assert.throws(() => {
     event.input.command = "rm -rf .";
   }, TypeError);
+  const gitEvent = {
+    toolName: "bash",
+    toolCallId: "git-status-contained",
+    input: { command: "git status" },
+  };
+  assert.equal(await handlers.get("tool_call")!(gitEvent, {
+    cwd: process.cwd(),
+    hasUI: false,
+    ui: {},
+  }), undefined);
 });
 
 test("the registered bash executor refuses calls without a one-use capability", async () => {
@@ -649,7 +742,7 @@ test("an in-flight model approval is invalidated by a config reload", async () =
   const reviewerConfig = join(runtime, "reviewers.json");
   writeFileSync(
     reviewerConfig,
-    JSON.stringify({ reviewers: [{ level: 0, model: "test/reviewer" }] }),
+    JSON.stringify({ reviewers: [{ level: 1, model: "test/reviewer" }] }),
   );
   process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
 
@@ -680,7 +773,7 @@ test("an in-flight model approval is invalidated by a config reload", async () =
     {
       toolName: "bash",
       toolCallId: "config-race",
-      input: { command: "echo hello" },
+      input: { command: "echo hello | wc -c" },
     },
     {
       cwd: process.cwd(),

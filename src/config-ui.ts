@@ -36,6 +36,7 @@ const ACTIONS = [
   "Move a tied reviewer",
   "Configure review context",
   "Configure reactive review",
+  "Configure boundary review",
   "Edit policy",
   "Edit Guardian prompt",
   "Edit JSON (advanced)",
@@ -80,6 +81,7 @@ export async function handleConfigCommand(
   if (action === "Move a tied reviewer") return moveReviewer(ctx, options);
   if (action === "Configure review context") return configureReviewContext(ctx, options);
   if (action === "Configure reactive review") return configureReactiveReview(ctx, options);
+  if (action === "Configure boundary review") return configureBoundaryReview(ctx, options);
   if (action === "Edit policy") return editPolicy(ctx, options);
   if (action === "Edit Guardian prompt") return editGuardianPrompt(ctx, options);
   return editJson(ctx, options);
@@ -123,6 +125,10 @@ function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void 
     reasoning: "one-lower",
     floor: "low",
   };
+  const boundaryReview = loaded.config.boundaryReview ?? {
+    gitFsmonitor: true,
+    gitSshAgent: "review",
+  };
   ctx.ui.notify(
     [
       `Config: ${loaded.source ?? "not created"}`,
@@ -132,9 +138,39 @@ function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void 
       `Guardian prompt: ${loaded.guardianPromptSource ?? "built-in"}`,
       `Context: ${reviewContext.mode}, ${reviewContext.conversationTokens} conversation tokens + ${reviewContext.toolTokens} tool tokens, ${reviewContext.persistence} persistence`,
       `Reactive review: ${reactiveReview.reasoning}${reactiveReview.reasoning === "one-lower" ? ` (floor ${reactiveReview.floor})` : ""}`,
+      `Boundary review: Git fsmonitor ${boundaryReview.gitFsmonitor ? "enabled" : "disabled"}, Git SSH agent ${boundaryReview.gitSshAgent}`,
     ].join("\n"),
     loaded.valid ? "info" : "error",
   );
+}
+
+async function configureBoundaryReview(
+  ctx: ConfigContext,
+  options: ConfigCommandOptions,
+): Promise<void> {
+  const loaded = options.getLoaded();
+  const current = loaded.config.boundaryReview ?? {
+    gitFsmonitor: true,
+    gitSshAgent: "review" as const,
+  };
+  const gitFsmonitor = await ctx.ui.select("Git fsmonitor boundary", [
+    "enabled — exact macOS socket or invocation-local Linux disable",
+    "disabled — do not add Git fsmonitor compatibility",
+  ]);
+  if (!gitFsmonitor) return;
+  const gitSshAgent = await ctx.ui.select("Git SSH agent boundary", [
+    "review — send a Git SSH agent request to the reviewer chain",
+    "block — deny Git SSH agent access deterministically",
+  ]);
+  if (!gitSshAgent) return;
+  persist(ctx, options, {
+    ...loaded.config,
+    boundaryReview: {
+      ...current,
+      gitFsmonitor: gitFsmonitor.startsWith("enabled"),
+      gitSshAgent: gitSshAgent.startsWith("review") ? "review" : "block",
+    },
+  });
 }
 
 async function configureReactiveReview(

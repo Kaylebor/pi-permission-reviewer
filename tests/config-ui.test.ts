@@ -164,6 +164,59 @@ test("configure UI exposes resumed-winner reasoning reduction", async () => {
   }
 });
 
+test("configure UI exposes boundary review controls and status", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-ui-"));
+  const path = join(directory, "config.json");
+  const previous = process.env.PI_PERMISSION_REVIEWER_CONFIG;
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = path;
+  let loaded = loadConfig(path);
+  const selections = [
+    "Configure boundary review",
+    "enabled — allow the reviewable Git fsmonitor boundary path",
+    "block — deny Git SSH agent access deterministically",
+  ];
+  const notices: string[] = [];
+  try {
+    await handleConfigCommand(
+      "configure",
+      {
+        hasUI: true,
+        scopedModels: [],
+        modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false },
+        ui: {
+          select: async () => selections.shift(),
+          input: async () => undefined,
+          editor: async () => undefined,
+          confirm: async () => false,
+          notify(message: string) { notices.push(message); },
+        },
+      } as any,
+      {
+        getLoaded: () => loaded,
+        setLoaded: (next) => { loaded = next; },
+      },
+    );
+    assert.deepEqual(loaded.config.boundaryReview, {
+      gitFsmonitor: true,
+      gitSshAgent: "block",
+    });
+    await handleConfigCommand(
+      "status",
+      {
+        hasUI: true,
+        scopedModels: [],
+        modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false },
+        ui: { notify(message: string) { notices.push(message); } },
+      } as any,
+      { getLoaded: () => loaded, setLoaded() {} },
+    );
+    assert.match(notices.at(-1) ?? "", /Boundary review: Git fsmonitor enabled, Git SSH agent block/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_PERMISSION_REVIEWER_CONFIG;
+    else process.env.PI_PERMISSION_REVIEWER_CONFIG = previous;
+  }
+});
+
 test("Guardian prompt editor saves the configured Markdown and status only reports its source", async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-ui-"));
   const path = join(directory, "config.json");

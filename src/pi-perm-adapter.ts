@@ -78,6 +78,11 @@ interface PrivatePiPermModules {
 
 const CONFIRMATION_PROBE = Symbol("pi-permission-reviewer.confirmation-probe");
 
+interface ConfirmationProbe {
+  marker: typeof CONFIRMATION_PROBE;
+  message?: string;
+}
+
 export async function createPiPermAdapter(
   options: PiPermAdapterOptions,
   dependencies: PiPermAdapterDependencies = {},
@@ -157,11 +162,20 @@ class ActivePiPermAdapter implements PiPermAdapter {
             ...ctx,
             ui: {
               ...ctx.ui,
-              confirm: async () => { throw CONFIRMATION_PROBE; },
-              select: async () => { throw CONFIRMATION_PROBE; },
-              prompt: async () => { throw CONFIRMATION_PROBE; },
+              confirm: async (_title: string, message: string) => {
+                throw { marker: CONFIRMATION_PROBE, message } satisfies ConfirmationProbe;
+              },
+              select: async (title: string, _options: string[]) => {
+                throw {
+                  marker: CONFIRMATION_PROBE,
+                  message: title,
+                } satisfies ConfirmationProbe;
+              },
+              prompt: async (_title: string, message: string) => {
+                throw { marker: CONFIRMATION_PROBE, message } satisfies ConfirmationProbe;
+              },
             },
-          } as ExtensionContext),
+          } as unknown as ExtensionContext),
         );
         return decision?.block
           ? { kind: "block", decision }
@@ -169,8 +183,11 @@ class ActivePiPermAdapter implements PiPermAdapter {
             ? { kind: "allow" }
             : { kind: "block", decision: blockedDecision("Permission engine returned an unsupported decision") };
       } catch (error) {
-        if (error === CONFIRMATION_PROBE) {
-          return { kind: "confirm", reason: "pi-perm requested confirmation for this file operation" };
+        if (isConfirmationProbe(error)) {
+          return {
+            kind: "confirm",
+            reason: error.message?.trim() || "pi-perm requested confirmation for this operation",
+          };
         }
         return {
           kind: "block",
@@ -218,6 +235,11 @@ class ActivePiPermAdapter implements PiPermAdapter {
     );
     return run;
   }
+}
+
+function isConfirmationProbe(value: unknown): value is ConfirmationProbe {
+  return typeof value === "object" && value !== null &&
+    (value as { marker?: unknown }).marker === CONFIRMATION_PROBE;
 }
 
 function failedAdapter(initialCwd: string, error: string): PiPermAdapter {

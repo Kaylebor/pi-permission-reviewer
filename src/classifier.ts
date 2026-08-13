@@ -4,17 +4,6 @@ export interface CommandClassification {
   reason: string;
 }
 
-const SAFE_COMMANDS = new Set([
-  "basename",
-  "dirname",
-  "head",
-  "ls",
-  "pwd",
-  "tail",
-  "tree",
-  "wc",
-]);
-
 const HARD_BLOCK = [
   /(?:^|[\s'"=])(?:(?:~|\$(?:HOME|USERPROFILE)|\$\{(?:HOME|USERPROFILE)\})\/|\/(?:Users|home)\/[^/]+\/)?(?:\.ssh|\.gnupg|\.aws|\.kube|\.docker|\.config\/gcloud|\.azure|Library\/Keychains)(?:\/|[\s'";]|$)/i,
   /(?:^|[\s/'"])(?:\.netrc|\.npmrc|\.pypirc|\.git-credentials|auth\.json|\.env(?:\.[^\s/'"]*)?)(?:[\s/'";]|$)/i,
@@ -83,19 +72,10 @@ export function classifyBash(command: string): CommandClassification {
       reason: "complex shell syntax requires deep review",
     };
   }
-  const words = normalized.split(" ");
-  const commandName = words[0] === "git" ? words.slice(0, 2).join(" ") : words[0];
-  if (SAFE_COMMANDS.has(commandName)) {
-    return {
-      action: "skip",
-      minimumLevel: 0,
-      reason: "known read-only command; sandbox remains authoritative",
-    };
-  }
   return {
-    action: "review",
+    action: "skip",
     minimumLevel: 0,
-    reason: "uncategorized simple command",
+    reason: "no proactive rule matched; sandbox boundary remains authoritative",
   };
 }
 
