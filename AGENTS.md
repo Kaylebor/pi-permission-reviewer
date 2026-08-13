@@ -1,0 +1,58 @@
+# Repository guidance
+
+## Current security boundary
+
+- The extension mediates Pi `tool_call` events. Tiered model review applies to
+  agent-issued `bash`; non-bash tools remain under pi-perm's deterministic and
+  human-confirmation policy.
+- The registered bash executor must consume a one-use approval capability bound
+  to the exact tool-call ID, input, CWD, configuration generation, session
+  epoch, and frozen sandbox settings.
+- Deterministic denies are terminal. Reviewers cannot weaken pi-perm or SRT
+  policy. Reviewer calls remain tool-less, bounded, and fail closed.
+- Pi extensions are trusted in-process code. Direct filesystem, network, or
+  `child_process` use by another extension is not intercepted. Never claim that
+  this package mediates every effect of Pi or sandboxes other extensions.
+- A model-facing custom tool that spawns or performs effects internally is
+  outside this package's execution boundary once its outer call is allowed.
+  New integrations should route effects through Pi's guarded tools or an
+  equivalent capability-bound sandbox broker.
+
+## Dependency and integration invariants
+
+- `pi-perm` is bundled and pinned exactly to 0.1.8. Its programmatic core is a
+  private, untyped seam: keep all imports inside `src/pi-perm-adapter.ts`, retain
+  runtime shape/version validation, and require an explicit compatibility audit
+  before changing the version.
+- Do not load standalone `pi-perm` or another approval extension beside this
+  package without analyzing handler order, duplicate prompts, bash-tool
+  replacement, and fail-closed behavior.
+- Ambient extension discovery is the present integration mechanism for child Pi
+  processes such as `pi-subagents`. Each child owns separate reviewer state.
+  Explicit extension allowlists or extension-denying ceilings may exclude this
+  package; dependency presence alone does not load or compose it.
+- Never treat installed or runtime-acknowledged extension presence as proof that
+  this package owns the effective bash executor. A competing bash registration
+  can bypass capability consumption and SRT execution. Reject competing bash
+  overrides in any profile described as securely gated.
+- `pi-subagents` runner-side process launches, worktree operations, hooks, and
+  other extension internals are outside this sandbox. Only the child's later Pi
+  tool calls can be independently gated, subject to extension loading and
+  effective tool ownership.
+- Direct process-local integration APIs are future design work, not supported
+  behavior. Keep proposals in `docs/future-extension-integration.md` until a
+  versioned contract and adversarial tests exist.
+
+## Change discipline
+
+- Preserve the execution-plane/review-plane split described in
+  `docs/architecture.md`.
+- Add regression tests for classifier precedence, capability binding, session
+  and configuration invalidation, cancellation, worker cleanup, and every new
+  reactive authorization path.
+- Keep README security claims narrower than the implemented boundary. Update
+  README, architecture notes, examples, and future-design notes together when a
+  change affects user expectations.
+- Before committing, run `npm run check`, `npm run package:check`, and
+  `git diff --check`. The macOS runtime is exercised; Linux runtime validation
+  remains required before claiming cross-platform readiness.

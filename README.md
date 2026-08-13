@@ -25,6 +25,35 @@ remain under `pi-perm`'s deterministic boundary and human confirmation flow;
 arbitrary custom tools, MCP actions, and user-entered `!` commands are not
 covered by the reviewer chain.
 
+### Trust boundary
+
+This package mediates Pi tool calls; it is not a sandbox around the Pi process
+or around extension code. A model cannot directly invoke Node APIs, but every
+loaded Pi extension is trusted code running with Pi's own permissions. An
+extension can initiate effects from a tool, command, event handler, timer, or
+background job without a new `tool_call` event, using APIs such as
+`child_process.spawn()`, filesystem functions, or network clients. A custom
+model-facing tool that performs such effects internally is therefore outside
+this package's execution boundary after its outer tool call has been allowed.
+
+Treat installed extensions, custom tools, and package update sources as part of
+the trusted computing base. Prefer integrations that use Pi's normal tools, or
+that deliberately execute through an equivalent sandbox and immutable approval
+capability. Do not describe this extension as mediating every effect of the Pi
+process.
+
+`pi-subagents` launches a separate child Pi process. Its outer `subagent` call
+is visible here only as a non-bash Pi tool; the package's own process launches,
+worktree operations, hooks, and other runner internals are extension-side
+effects outside this sandbox. With ambient discovery enabled, the child
+normally loads this package independently. Its subsequent Pi `bash` calls
+receive this gate only if this package owns the child's effective bash tool and
+no competing extension override wins that slot. An explicit child `extensions`
+allowlist, `defaultExtensions: []`, `--no-extensions`, or an extension-denying
+capability ceiling can exclude it. Extension presence or launch acknowledgement
+alone does not prove effective executor ownership. Parent and child review
+state are never shared.
+
 ## Install from GitHub
 
 ```sh
@@ -223,7 +252,9 @@ deferred until the reactive review path is established.
 - [`pi-perm`](https://github.com/DCRcoder/pi-perm) supplies reusable permission
   evaluation and effective-profile translation. This extension replaces its
   CLI spawn hook with a per-invocation Sandbox Runtime library worker so an
-  off-list connection can be reviewed without restarting the command.
+  off-list connection can be reviewed without restarting the command. Version
+  0.1.8 exposes no documented stable embedder contract, so the private adapter
+  is pinned, shape-validated, and deliberately isolated.
 - [`pi-approval-guardian`](https://github.com/mics8128/pi-approval-guardian)
   informed the fail-closed reviewer and exact-input locking design. It is not a
   runtime dependency because loading two independent approval extensions would
@@ -231,6 +262,9 @@ deferred until the reactive review path is established.
   older Pi release.
 
 See `THIRD_PARTY_NOTICES.md` for attribution.
+Ideas for safe inter-extension composition are recorded separately in
+[`docs/future-extension-integration.md`](docs/future-extension-integration.md);
+they are not current guarantees.
 
 ## Development
 
