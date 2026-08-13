@@ -18,6 +18,7 @@ function capability(overrides: Partial<Parameters<typeof createReviewCase>[0]> =
     input: { command: "git status", options: { short: true } },
     cwd: "/workspace",
     minimumLevel: 1,
+    guardianPrompt: "Allow bounded skill-definition reads.",
     sandboxSettings: { allowNetwork: false, nested: { mode: "strict" } },
     ...overrides,
   });
@@ -97,6 +98,10 @@ test("consume accepts the exact immutable capability once", () => {
       nested: { mode: "strict" },
     });
     assert.ok(Object.isFrozen(consumed.capability.reviewCase.sandboxSettings));
+    assert.equal(
+      consumed.capability.reviewCase.guardianPrompt,
+      "Allow bounded skill-definition reads.",
+    );
   }
   assert.deepEqual(store.consume(invocation()), { ok: false, reason: "replayed" });
 });

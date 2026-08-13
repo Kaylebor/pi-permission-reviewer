@@ -28,6 +28,7 @@ export interface CreateReviewCaseOptions {
   policyReason?: string;
   directUserInput?: string;
   policy?: string;
+  guardianPrompt?: string;
   sandboxSettings: Record<string, unknown>;
 }
 
@@ -96,6 +97,9 @@ export function createReviewCase(options: CreateReviewCaseOptions): ReviewCase {
       ? {}
       : { directUserInput: options.directUserInput }),
     ...(options.policy === undefined ? {} : { policy: options.policy }),
+    ...(options.guardianPrompt === undefined
+      ? {}
+      : { guardianPrompt: options.guardianPrompt }),
     sandboxSettings,
   };
   return freezeReviewCase(reviewCase);
@@ -216,6 +220,9 @@ function snapshotCapability(capability: ApprovalCapability): ApprovalCapability 
       ? {}
       : { directUserInput: reviewCase.directUserInput }),
     ...(reviewCase.policy === undefined ? {} : { policy: reviewCase.policy }),
+    ...(reviewCase.guardianPrompt === undefined
+      ? {}
+      : { guardianPrompt: reviewCase.guardianPrompt }),
     sandboxSettings: reviewCase.sandboxSettings,
   });
   const request = freezeRequest({

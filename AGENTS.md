@@ -17,6 +17,10 @@
   weaken pi-perm or SRT policy. Permission results must not set Pi's `terminate`
   flag: return the reason as a blocked tool result so the agent can continue
   autonomously. Reviewer calls remain tool-less, bounded, and fail closed.
+- The built-in Guardian prompt treats bounded task-relevant repository,
+  instruction, skill-definition, and documentation reads as implicitly
+  authorized. Do not broaden this to secrets, credentials, unrelated personal
+  data, broad discovery, writes, execution, or network access.
 - Pi extensions are trusted in-process code. Direct filesystem, network, or
   `child_process` use by another extension is not intercepted. Never claim that
   this package mediates every effect of Pi or sandboxes other extensions.
@@ -51,6 +55,9 @@
   versioned contract and adversarial tests exist.
 - Treat pi-perm's `audit.jsonl` as policy-stage telemetry, not a final approval
   or execution ledger. A file confirmation entry records a review handoff.
+- `guardianPromptFile` is trusted user-authored system guidance. Keep loading
+  bounded and fail closed, preserve the non-overridable reviewer role/JSON
+  contract, and snapshot its content into each immutable review case.
 
 ## Change discipline
 

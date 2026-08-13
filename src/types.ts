@@ -12,6 +12,8 @@ export interface ReviewerConfig {
 export interface PermissionReviewerConfig {
   reviewers: ReviewerConfig[];
   policy?: string;
+  /** Path to a trusted local Markdown extension for the Guardian prompt. */
+  guardianPromptFile?: string;
   reviewContext?: ReviewContextConfig;
   reactiveReview?: ReactiveReviewConfig;
 }

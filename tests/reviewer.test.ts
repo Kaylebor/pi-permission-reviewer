@@ -1,12 +1,54 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildReviewerSystemPrompt,
   createReviewerTranscript,
   invokeModelReviewer,
   invokeNetworkReviewer,
   parseAssessment,
   transcriptRetainsEvidence,
 } from "../src/reviewer.ts";
+
+test("Guardian prompt permits bounded implicit context reads and accepts local extensions", () => {
+  const builtIn = buildReviewerSystemPrompt();
+  assert.match(builtIn, /installed skill definitions/);
+  assert.match(builtIn, /user need not name every such file/);
+  assert.match(builtIn, /does not authorize[\s\S]*credentials or secrets/);
+
+  const extended = buildReviewerSystemPrompt(
+    "Allow bounded reads of my portable agent configuration.",
+  );
+  assert.match(extended, /<guardian_extension>/);
+  assert.match(extended, /portable agent configuration/);
+  assert.ok(
+    extended.indexOf("portable agent configuration") <
+      extended.indexOf("required response schema"),
+  );
+});
+
+test("model review receives the configured Guardian prompt as system guidance", async () => {
+  let systemPrompt = "";
+  const result = await invokeModelReviewer(
+    {
+      find: () => ({ provider: "test", id: "reviewer" }),
+      hasConfiguredAuth: () => true,
+      complete: async (_model: unknown, context: { systemPrompt: string }) => {
+        systemPrompt = context.systemPrompt;
+        return {
+          stopReason: "stop",
+          content: [{ type: "text", text: '{"decision":"allow","reason":"bounded"}' }],
+        };
+      },
+    } as any,
+    { reviewer: { level: 0, model: "test/reviewer" } },
+    { tool: "read", input: { path: "/repo/SKILL.md" }, cwd: "/repo", minimumLevel: 0 },
+    undefined,
+    undefined,
+    { guardianPrompt: "Allow task-relevant installed skill reads." },
+  );
+  assert.equal(result.kind, "assessment");
+  assert.match(systemPrompt, /Allow task-relevant installed skill reads/);
+});
 
 test("parses the strict reviewer contract", () => {
   assert.deepEqual(

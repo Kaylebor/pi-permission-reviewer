@@ -14,6 +14,14 @@ calls. A `ContextLedger` follows Pi's `context` snapshots and finalized
 metadata only. Local reviewer histories contain only reviewer prompts and
 responses; they do not depend on provider-side session APIs.
 
+The reviewer system prompt includes a built-in implicit-authorization rule for
+bounded, task-relevant reads of repository context, project instructions,
+installed skill definitions, and documentation. An optional trusted Markdown
+Guardian extension is loaded with the JSON configuration, size-bounded, and
+inserted ahead of the non-overridable reviewer role and response-schema
+invariants. Its exact content is snapshotted into the immutable `ReviewCase`, so
+the initial and reactive decisions cannot observe different prompt generations.
+
 All permission denials are non-terminating Pi tool results. The denied action
 cannot execute, but its reason returns to the agent so it can recover, choose a
 different action, or request user guidance. Reviewer and human escalation—not

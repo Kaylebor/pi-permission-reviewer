@@ -3,10 +3,15 @@ import type {
   ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
+import { basename } from "node:path";
 import {
+  defaultGuardianPromptPath,
   defaultConfigPath,
+  loadConfig,
   parseModelSpec,
+  resolveGuardianPromptPath,
   saveConfig,
+  saveGuardianPrompt,
   validateConfig,
   type LoadedConfig,
 } from "./config.ts";
@@ -32,6 +37,7 @@ const ACTIONS = [
   "Configure review context",
   "Configure reactive review",
   "Edit policy",
+  "Edit Guardian prompt",
   "Edit JSON (advanced)",
 ] as const;
 
@@ -75,6 +81,7 @@ export async function handleConfigCommand(
   if (action === "Configure review context") return configureReviewContext(ctx, options);
   if (action === "Configure reactive review") return configureReactiveReview(ctx, options);
   if (action === "Edit policy") return editPolicy(ctx, options);
+  if (action === "Edit Guardian prompt") return editGuardianPrompt(ctx, options);
   return editJson(ctx, options);
 }
 
@@ -122,6 +129,7 @@ function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void 
       `Mode: ${loaded.valid && reviewers.length > 0 ? "model review, then human" : "human-only"}`,
       ...(reviewers.length > 0 ? reviewers : ["Reviewers: none"]),
       `Policy: ${loaded.config.policy ?? "default reviewer policy"}`,
+      `Guardian prompt: ${loaded.guardianPromptSource ?? "built-in"}`,
       `Context: ${reviewContext.mode}, ${reviewContext.conversationTokens} conversation tokens + ${reviewContext.toolTokens} tool tokens, ${reviewContext.persistence} persistence`,
       `Reactive review: ${reactiveReview.reasoning}${reactiveReview.reasoning === "one-lower" ? ` (floor ${reactiveReview.floor})` : ""}`,
     ].join("\n"),
@@ -322,6 +330,33 @@ async function editPolicy(
   });
 }
 
+async function editGuardianPrompt(
+  ctx: ConfigContext,
+  options: ConfigCommandOptions,
+): Promise<void> {
+  const loaded = options.getLoaded();
+  const guardianPromptFile =
+    loaded.config.guardianPromptFile ?? basename(defaultGuardianPromptPath());
+  const guardianPromptPath = resolveGuardianPromptPath(
+    guardianPromptFile,
+    loaded.source ?? defaultConfigPath(),
+  );
+  const prompt = await ctx.ui.editor(
+    `Edit Guardian prompt (${guardianPromptPath})`,
+    loaded.guardianPrompt ?? "",
+  );
+  if (prompt === undefined) return;
+  try {
+    saveGuardianPrompt(prompt, guardianPromptPath);
+    persist(ctx, options, { ...loaded.config, guardianPromptFile });
+  } catch (error) {
+    ctx.ui.notify(
+      `Guardian prompt not saved: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+  }
+}
+
 async function configureReviewContext(
   ctx: ConfigContext,
   options: ConfigCommandOptions,
@@ -403,15 +438,24 @@ function persist(
   ctx: Pick<ConfigContext, "ui">,
   options: ConfigCommandOptions,
   config: PermissionReviewerConfig,
-): void {
+): boolean {
   try {
     const loaded = saveConfig(config);
     options.setLoaded(loaded);
+    if (!loaded.valid) {
+      ctx.ui.notify(loaded.warnings[0] ?? "Saved configuration is invalid", "error");
+      return false;
+    }
     ctx.ui.notify(`Saved ${loaded.source}`, "info");
+    return true;
   } catch (error) {
+    // A related file (notably the Guardian prompt) may already have changed.
+    // Reloading invalidates the live generation and keeps disk and memory aligned.
+    options.setLoaded(loadConfig());
     ctx.ui.notify(
       `Configuration not saved: ${error instanceof Error ? error.message : String(error)}`,
       "error",
     );
+    return false;
   }
 }

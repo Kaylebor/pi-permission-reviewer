@@ -78,7 +78,7 @@ Run:
 
 The interactive menu can add and remove reviewers, change same-level fallback
 order, configure reviewer context and history persistence, edit the additional
-policy, or open the complete JSON in Pi's editor.
+policy or Guardian prompt, or open the complete JSON in Pi's editor.
 Changes are written atomically, use user-only file permissions on Unix, and take
 effect in the running Pi session.
 
@@ -114,6 +114,32 @@ to the human rather than silently weakening policy.
 If the underlying permission-engine configuration cannot be parsed or
 validated, the extension still installs a fail-closed handler that blocks all
 agent tool calls and reports the initialization error.
+
+The built-in Guardian prompt treats bounded, task-relevant, read-only context
+gathering as implicit authorization. Reviewers should therefore allow ordinary
+reads of relevant repository files, project instructions, installed skill
+definitions, and documentation without requiring the user to name each file.
+This does not extend to credentials, secrets, broad home-directory discovery,
+unrelated personal data, writes, execution, or network access.
+
+Set `guardianPromptFile` to a trusted Markdown file to add local authorization
+guidance to the reviewer system prompt. Relative paths resolve beside the JSON
+configuration; absolute paths and `~/...` are also supported. The configuration
+menu's **Edit Guardian prompt** action uses
+`~/.pi/agent/permission-reviewer.guardian.md` by default. The file is limited to
+32 KiB, loaded at startup, `/permission-reviewer reload`, or any successful
+configuration save, and snapshotted into each immutable permission case so
+reactive review uses the same guidance.
+A configured file that is missing, unreadable, not a regular `.md` file, or too
+large disables automatic approval and falls back to the human. Its contents are
+sent to every configured reviewer as trusted system guidance, so keep secrets
+and provider-specific credentials out of it.
+
+```json
+{
+  "guardianPromptFile": "permission-reviewer.guardian.md"
+}
+```
 
 Runtime audit and generated sandbox files live under
 `~/.pi/agent/permission-reviewer`. Set `PI_PERMISSION_REVIEWER_RUNTIME_DIR` to
@@ -156,6 +182,9 @@ before human fallback. The user decides which models meet those roles.
   optional stronger level 2.
 - [`examples/same-level-fallbacks.json`](examples/same-level-fallbacks.json)
   shows provider failover without invoking two models at the same level.
+- [`examples/guardian-prompt.md`](examples/guardian-prompt.md) is a small
+  portable starting point for `guardianPromptFile`; the Pi configuration UI can
+  create and edit the active file directly.
 
 Names outside Pi's built-in catalogue are illustrative. Replace them with the
 exact identifiers shown by `/permission-reviewer models` after configuring the

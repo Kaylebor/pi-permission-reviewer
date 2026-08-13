@@ -31,6 +31,7 @@ export interface ReviewCase {
   policyReason?: string;
   directUserInput?: string;
   policy?: string;
+  guardianPrompt?: string;
   sandboxSettings: Readonly<Record<string, unknown>>;
 }
 

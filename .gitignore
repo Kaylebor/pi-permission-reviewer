@@ -1,4 +1,5 @@
 node_modules/
 *.tgz
 coverage/
+graphify-out/
 config.json

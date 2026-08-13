@@ -1,14 +1,20 @@
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { TextDecoder } from "node:util";
 import type {
   PermissionReviewerConfig,
   ReviewerConfig,
@@ -29,10 +35,13 @@ const DEFAULT_CONFIG: PermissionReviewerConfig = {
   reviewContext: DEFAULT_REVIEW_CONTEXT,
   reactiveReview: DEFAULT_REACTIVE_REVIEW,
 };
+const MAX_GUARDIAN_PROMPT_BYTES = 32 * 1024;
 
 export interface LoadedConfig {
   config: PermissionReviewerConfig;
   source?: string;
+  guardianPrompt?: string;
+  guardianPromptSource?: string;
   warnings: string[];
   valid: boolean;
 }
@@ -43,7 +52,31 @@ export function loadConfig(path = defaultConfigPath()): LoadedConfig {
   }
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    return { config: validateConfig(raw), source: path, warnings: [], valid: true };
+    const config = validateConfig(raw);
+    if (!config.guardianPromptFile) {
+      return { config, source: path, warnings: [], valid: true };
+    }
+    const guardianPromptSource = resolveGuardianPromptPath(config.guardianPromptFile, path);
+    try {
+      return {
+        config,
+        source: path,
+        guardianPrompt: loadGuardianPrompt(guardianPromptSource),
+        guardianPromptSource,
+        warnings: [],
+        valid: true,
+      };
+    } catch (error) {
+      return {
+        config,
+        source: path,
+        guardianPromptSource,
+        warnings: [
+          `Guardian prompt could not be loaded; automatic approval is disabled: ${error instanceof Error ? error.message : String(error)}`,
+        ],
+        valid: false,
+      };
+    }
   } catch (error) {
     return {
       config: DEFAULT_CONFIG,
@@ -75,11 +108,13 @@ export function validateConfig(value: unknown): PermissionReviewerConfig {
   }
   const reviewContext = validateReviewContext(value.reviewContext);
   const reactiveReview = validateReactiveReview(value.reactiveReview);
+  const guardianPromptFile = validateGuardianPromptFile(value.guardianPromptFile);
   return {
     reviewers,
     reviewContext,
     reactiveReview,
     ...(value.policy ? { policy: value.policy } : {}),
+    ...(guardianPromptFile ? { guardianPromptFile } : {}),
   };
 }
 
@@ -138,6 +173,102 @@ export function saveConfig(
   path = defaultConfigPath(),
 ): LoadedConfig {
   const validated = validateConfig(config);
+  writePrivateFileAtomically(path, `${JSON.stringify(validated, null, 2)}\n`);
+  return loadConfig(path);
+}
+
+export function defaultConfigPath(): string {
+  return (
+    process.env.PI_PERMISSION_REVIEWER_CONFIG ??
+    join(homedir(), ".pi", "agent", "permission-reviewer.json")
+  );
+}
+
+export function defaultGuardianPromptPath(): string {
+  return join(homedir(), ".pi", "agent", "permission-reviewer.guardian.md");
+}
+
+export function resolveGuardianPromptPath(
+  promptFile: string,
+  configPath = defaultConfigPath(),
+): string {
+  const validated = validateGuardianPromptFile(promptFile);
+  if (!validated) throw new Error("guardianPromptFile must be a non-empty .md filename");
+  if (validated.startsWith("~/")) return join(homedir(), validated.slice(2));
+  return isAbsolute(validated) ? validated : resolve(dirname(configPath), validated);
+}
+
+export function saveGuardianPrompt(
+  prompt: string,
+  path = defaultGuardianPromptPath(),
+): void {
+  if (typeof prompt !== "string") throw new Error("guardian prompt must be text");
+  if (Buffer.byteLength(prompt, "utf8") > MAX_GUARDIAN_PROMPT_BYTES) {
+    throw new Error("guardian prompt must not exceed 32768 UTF-8 bytes");
+  }
+  writePrivateFileAtomically(path, prompt);
+}
+
+function loadGuardianPrompt(path: string): string {
+  const guardedOpenFlags =
+    process.platform === "win32"
+      ? 0
+      : constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  let descriptor: number;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | guardedOpenFlags);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ELOOP") {
+      throw new Error("guardian prompt must be a regular file, not a symbolic link");
+    }
+    throw error;
+  }
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile()) throw new Error("guardian prompt must be a regular file");
+    if (stat.size > MAX_GUARDIAN_PROMPT_BYTES) {
+      throw new Error("guardian prompt must not exceed 32768 UTF-8 bytes");
+    }
+    const buffer = Buffer.allocUnsafe(MAX_GUARDIAN_PROMPT_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.byteLength) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        bytesRead,
+        buffer.byteLength - bytesRead,
+        null,
+      );
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    if (bytesRead > MAX_GUARDIAN_PROMPT_BYTES) {
+      throw new Error("guardian prompt must not exceed 32768 UTF-8 bytes");
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      buffer.subarray(0, bytesRead),
+    );
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function validateGuardianPromptFile(value: unknown): string | undefined {
+  if (value === undefined) return;
+  if (typeof value !== "string") throw new Error("guardianPromptFile must be a string");
+  if (value.includes("\0")) throw new Error("guardianPromptFile must not contain NUL");
+  const filename = basename(value);
+  if (
+    value.trim().length === 0 ||
+    !filename.endsWith(".md") ||
+    filename.slice(0, -".md".length).trim().length === 0
+  ) {
+    throw new Error("guardianPromptFile must be a non-empty .md filename");
+  }
+  return value;
+}
+
+function writePrivateFileAtomically(path: string, contents: string): void {
   const directory = dirname(path);
   const temporary = join(
     directory,
@@ -145,7 +276,7 @@ export function saveConfig(
   );
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   try {
-    writeFileSync(temporary, `${JSON.stringify(validated, null, 2)}\n`, {
+    writeFileSync(temporary, contents, {
       encoding: "utf8",
       flag: "wx",
       mode: 0o600,
@@ -155,14 +286,6 @@ export function saveConfig(
   } finally {
     rmSync(temporary, { force: true });
   }
-  return { config: validated, source: path, warnings: [], valid: true };
-}
-
-export function defaultConfigPath(): string {
-  return (
-    process.env.PI_PERMISSION_REVIEWER_CONFIG ??
-    join(homedir(), ".pi", "agent", "permission-reviewer.json")
-  );
 }
 
 function validateReviewer(value: unknown, index: number): ReviewerConfig {

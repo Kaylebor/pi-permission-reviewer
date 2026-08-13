@@ -261,6 +261,9 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
           minimumLevel: request.minimumLevel,
           policyReason: request.policyReason,
           ...(loaded.config.policy ? { policy: loaded.config.policy } : {}),
+          ...(loaded.guardianPrompt
+            ? { guardianPrompt: loaded.guardianPrompt }
+            : {}),
           // File tools use Pi's built-in executors, not the SRT-backed bash
           // executor. Retain a stable, empty execution snapshot for the
           // immutable review-case schema without suggesting an SRT guarantee.
@@ -316,6 +319,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
                 evidence,
                 transcript,
                 caseId: reviewCase.id,
+                guardianPrompt: reviewConfig.guardianPrompt,
                 validateBeforeCommit: () => validateFileReviewBoundary({
                   event,
                   initialInputDigest,
@@ -403,11 +407,23 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       minimumLevel: classification.minimumLevel,
       policyReason: permissionDecision?.reason ?? classification.reason,
     };
+    const reviewConfig = loaded;
+    const reviewGeneration = configGeneration;
+    const reviewEpoch = sessionEpoch;
+    let sandboxSettings: Record<string, unknown>;
+    try {
+      sandboxSettings = await permissions.getHardenedSrtSettings(ctx.cwd);
+    } catch (error) {
+      return blockToolCall(`Could not snapshot the permission boundary: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (configGeneration !== reviewGeneration || sessionEpoch !== reviewEpoch) {
+      return blockToolCall("The permission boundary changed while this action was being prepared; retry the action");
+    }
     let reviewCase: ReviewCase;
     try {
       reviewCase = createReviewCase({
-        sessionEpoch,
-        configGeneration,
+        sessionEpoch: reviewEpoch,
+        configGeneration: reviewGeneration,
         toolCallId: event.toolCallId,
         tool: event.toolName,
         input: event.input as Record<string, unknown>,
@@ -415,8 +431,11 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         minimumLevel: request.minimumLevel,
         ...(request.policyReason ? { policyReason: request.policyReason } : {}),
         ...(request.directUserInput ? { directUserInput: request.directUserInput } : {}),
-        ...(loaded.config.policy ? { policy: loaded.config.policy } : {}),
-        sandboxSettings: await permissions.getHardenedSrtSettings(ctx.cwd),
+        ...(reviewConfig.config.policy ? { policy: reviewConfig.config.policy } : {}),
+        ...(reviewConfig.guardianPrompt
+          ? { guardianPrompt: reviewConfig.guardianPrompt }
+          : {}),
+        sandboxSettings,
       });
     } catch (error) {
       return blockToolCall(`Could not snapshot the permission boundary: ${error instanceof Error ? error.message : String(error)}`);
@@ -429,8 +448,6 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       return humanReview(event, request, ctx, undefined, () =>
         approvals.remember({ reviewCase, request }));
     }
-    const reviewConfig = loaded;
-    const reviewGeneration = configGeneration;
     const reviewSignal = ctx.signal
       ? AbortSignal.any([ctx.signal, reviewerLifecycle.signal])
       : reviewerLifecycle.signal;
@@ -459,22 +476,20 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
             ctx.modelRegistry,
             invocation,
             request,
-            reviewConfig.config.policy,
+            reviewCase.policy,
             reviewSignal,
-            { evidence, transcript, caseId: reviewCase.id },
+            {
+              evidence,
+              transcript,
+              caseId: reviewCase.id,
+              guardianPrompt: reviewCase.guardianPrompt,
+            },
           ),
         }),
     });
     if (configGeneration !== reviewGeneration) {
-      const result = await humanReview(
-        event,
-        request,
-        ctx,
-        "Reviewer configuration changed while this action was under review",
-        () => approvals.remember({ reviewCase, request }),
-      );
-      if (result?.block) cleanupCaseState(reviewCase.id, reviewerTranscripts, caseEvidence);
-      return result;
+      cleanupCaseState(reviewCase.id, reviewerTranscripts, caseEvidence);
+      return blockToolCall("Reviewer configuration changed while this action was under review; retry the action");
     }
     if (reviewed.decision === "allow") {
       caseEvidence.set(reviewCase.id, evidence);
@@ -619,6 +634,7 @@ async function reviewNetworkRequest(
                 : {}),
               transcript,
               caseId,
+              guardianPrompt: approved.reviewCase.guardianPrompt,
               ...(resumesWinner
                 ? { reasoning: resolveReactiveReasoning(invocation.reviewer, reactiveReview) }
                 : {}),
