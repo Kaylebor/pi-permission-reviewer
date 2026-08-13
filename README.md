@@ -157,13 +157,16 @@ bounded evidence packet.
 
 ## Current routing policy
 
-- Known read-only commands skip model review but still run under the sandbox.
+- Known read-only commands skip model review but still run under the sandbox,
+  unless they contain a pipe or redirection.
 - Uncategorized simple commands start at level 0.
 - Complex shell syntax starts at level 1.
 - Privileged, publishing, infrastructure, and external Git writes go directly
   to the human.
-- Recognized credential paths, literal `curl`/`wget` pipelines, and severe
-  system actions are blocked deterministically.
+- Every pipe or redirection goes to level 1 review after deterministic deny
+  rules, even when the base command is normally skipped or human-routed.
+- Recognized credential paths, remote content piped into a shell interpreter,
+  and severe system actions are blocked deterministically.
 
 These rules are intentionally conservative and are not a shell security parser.
 Obfuscated shell spellings may bypass literal deterministic matches, but shell
