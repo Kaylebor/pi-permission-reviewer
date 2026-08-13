@@ -33,11 +33,11 @@ export async function runReviewLevels(options: {
       | undefined;
     for (const reviewer of reviewers) {
       const result = await options.invoke({ reviewer });
-      if (result.kind === "unavailable") {
+      if (result.kind === "unavailable" || result.kind === "failure" || result.kind === "timeout") {
         attempts.push({
           level,
           model: reviewer.model,
-          status: "unavailable",
+          status: result.kind,
           error: result.error,
         });
         continue;
@@ -60,15 +60,7 @@ export async function runReviewLevels(options: {
         attempts,
       };
     }
-    if (result.kind !== "assessment") {
-      attempts.push({
-        level,
-        model: reviewer.model,
-        status: result.kind,
-        error: result.error,
-      });
-      continue;
-    }
+    if (result.kind !== "assessment") continue;
     attempts.push({
       level,
       model: reviewer.model,

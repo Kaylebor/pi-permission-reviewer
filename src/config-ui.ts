@@ -29,6 +29,7 @@ const ACTIONS = [
   "Add a reviewer",
   "Remove a reviewer",
   "Move a tied reviewer",
+  "Configure review context",
   "Edit policy",
   "Edit JSON (advanced)",
 ] as const;
@@ -70,6 +71,7 @@ export async function handleConfigCommand(
   if (action === "Add a reviewer") return addReviewer(ctx, options);
   if (action === "Remove a reviewer") return removeReviewer(ctx, options);
   if (action === "Move a tied reviewer") return moveReviewer(ctx, options);
+  if (action === "Configure review context") return configureReviewContext(ctx, options);
   if (action === "Edit policy") return editPolicy(ctx, options);
   return editJson(ctx, options);
 }
@@ -98,6 +100,12 @@ function modelSpecs(
 }
 
 function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void {
+  const reviewContext = loaded.config.reviewContext ?? {
+    mode: "transcript",
+    conversationTokens: 4_000,
+    toolTokens: 2_000,
+    persistence: "command",
+  };
   const reviewers = loaded.config.reviewers.map(
     (reviewer, index) =>
       `${index + 1}. level ${reviewer.level}: ${reviewer.model} (${reviewer.reasoning ?? "low"}, ${reviewer.timeoutMs ?? 60_000}ms)`,
@@ -108,6 +116,7 @@ function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void 
       `Mode: ${loaded.valid && reviewers.length > 0 ? "model review, then human" : "human-only"}`,
       ...(reviewers.length > 0 ? reviewers : ["Reviewers: none"]),
       `Policy: ${loaded.config.policy ?? "default reviewer policy"}`,
+      `Context: ${reviewContext.mode}, ${reviewContext.conversationTokens} conversation tokens + ${reviewContext.toolTokens} tool tokens, ${reviewContext.persistence} persistence`,
     ].join("\n"),
     loaded.valid ? "info" : "error",
   );
@@ -261,8 +270,50 @@ async function editPolicy(
   );
   if (policy === undefined) return;
   persist(ctx, options, {
-    reviewers: loaded.config.reviewers,
+    ...loaded.config,
     ...(policy.trim() ? { policy: policy.trim() } : {}),
+  });
+}
+
+async function configureReviewContext(
+  ctx: ConfigContext,
+  options: ConfigCommandOptions,
+): Promise<void> {
+  const loaded = options.getLoaded();
+  const current = loaded.config.reviewContext ?? {
+    mode: "transcript" as const,
+    conversationTokens: 4_000,
+    toolTokens: 2_000,
+    persistence: "command" as const,
+  };
+  const mode = await ctx.ui.select("Reviewer context detail", [
+    "transcript — bounded redacted conversation text",
+    "metadata — aggregate counts only",
+  ]);
+  if (!mode) return;
+  const persistence = await ctx.ui.select("Reviewer history persistence", [
+    "command — isolated history per permission case",
+    "session — serialized reviewer trunk for the Pi session",
+  ]);
+  if (!persistence) return;
+  const conversation = await ctx.ui.input(
+    "Conversation token budget",
+    String(current.conversationTokens),
+  );
+  if (conversation === undefined) return;
+  const tools = await ctx.ui.input(
+    "Tool-output token budget",
+    String(current.toolTokens),
+  );
+  if (tools === undefined) return;
+  persist(ctx, options, {
+    ...loaded.config,
+    reviewContext: {
+      mode: mode.startsWith("transcript") ? "transcript" : "metadata",
+      persistence: persistence.startsWith("command") ? "command" : "session",
+      conversationTokens: Number(conversation),
+      toolTokens: Number(tools),
+    },
   });
 }
 

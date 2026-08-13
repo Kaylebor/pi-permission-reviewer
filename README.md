@@ -45,7 +45,8 @@ Run:
 ```
 
 The interactive menu can add and remove reviewers, change same-level fallback
-order, edit the additional policy, or open the complete JSON in Pi's editor.
+order, configure reviewer context and history persistence, edit the additional
+policy, or open the complete JSON in Pi's editor.
 Changes are written atomically, use user-only file permissions on Unix, and take
 effect in the running Pi session.
 
@@ -95,12 +96,12 @@ Semantics:
 
 - The command router assigns a minimum level.
 - Levels may be sparse and are visited in ascending numeric order.
-- Array order breaks ties. Unavailable entries are skipped during selection,
-  but at most one ready reviewer is invoked per level.
+- Array order breaks ties. Unavailable, failed, or timed-out entries fall
+  through to the next tied reviewer; each level accepts at most one assessment.
 - `allow` executes the exact, locked tool input.
 - `deny` blocks immediately.
-- `escalate`, unavailable models, failures, and timeouts advance to the next
-  strictly higher level.
+- `escalate` advances to the next strictly higher level after tied fallbacks
+  have served their availability role.
 - `human` or exhaustion reaches a human when interactive UI exists; headless
   operation fails closed.
 
@@ -125,9 +126,22 @@ provider in Pi. For example, a custom Ollama-compatible endpoint can be added
 through Pi's `~/.pi/agent/models.json`, then selected exactly like a native
 provider model.
 
-Reviewers have no tools. They receive an immutable evidence packet containing
-the tool input, working directory, classifier reason, policy, and latest direct
-user input. Future constrained read-only inspection should be added as an
+Reviewers have no tools. By default they receive the immutable permission case
+plus a bounded, redacted transcript derived from Pi's public `context` and
+`message_end` events. System prompts, thinking, image data, provider diagnostics,
+and opaque message details are excluded. Conversation and tool evidence have
+separate defaults of 4,000 and 2,000 approximate tokens. Set `reviewContext.mode`
+to `metadata` to share only aggregate counts, or adjust both budgets in the UI.
+Redaction recognizes structured sensitive keys and common credential patterns;
+it is defense in depth, not a guarantee that arbitrary secret text is detected.
+
+`reviewContext.persistence` defaults to `command`: the original assessment and
+reactive follow-up share a local message history which is destroyed when the
+command ends. Optional `session` persistence keeps a bounded local trunk per
+reviewer model for the Pi session. Session-trunk calls are serialized and all
+histories are cleared on session boundaries and configuration reload. These are
+provider-neutral local histories; the extension does not require a provider-side
+conversation API. Future constrained read-only inspection should be added as an
 explicit capability rather than exposing shell access.
 
 ## Current routing policy
@@ -152,12 +166,14 @@ reviewer; only operations classified for confirmation enter the model chain.
 
 An approved command remains inside Sandbox Runtime. If it attempts a connection
 outside the configured network allowlist, SRT pauses the original process before
-connecting and reports the concrete host and port. The extension then asks the
-same configured model reviewer once more using an immutable copy of the original
-request, its prior assessment, and the new destination. This is a fresh model
-completion with continuation context, not a provider-side chat session. If that
-reviewer cannot decide—or the command was approved by a human—the human receives
-a second, explicit destination prompt.
+connecting and reports the concrete host and port. The extension first resumes
+the local reviewer history of the model that allowed the command, adding the
+destination as a continuation. An escalation can then visit each strictly
+higher configured level; unavailable, failed, and timed-out models use
+same-level fallbacks in array order. If the chain cannot decide—or the command
+was approved by a human—the human receives a second, explicit destination
+prompt. Every invocation remains a fresh provider completion; continuity comes
+from locally supplied messages.
 
 Allowing the destination resumes the same process; the command is not rerun.
 The decision is bound to the exact Pi tool-call ID and cached only for that

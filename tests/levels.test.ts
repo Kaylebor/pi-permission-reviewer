@@ -39,7 +39,7 @@ test("tries each level at most once", async () => {
   assert.equal(result.decision, "allow");
 });
 
-test("skips unavailable ties but invokes at most one ready peer", async () => {
+test("uses tied fallbacks until one reviewer returns an assessment", async () => {
   const invoked: string[] = [];
   const result = await runReviewLevels({
     reviewers,
@@ -47,7 +47,7 @@ test("skips unavailable ties but invokes at most one ready peer", async () => {
     invoke: async ({ reviewer }) => {
       invoked.push(reviewer.model);
       if (reviewer.model === "test/luna") {
-        return { kind: "unavailable", error: "not authenticated" };
+        return { kind: "failure", error: "provider error" };
       }
       return {
         kind: "assessment",

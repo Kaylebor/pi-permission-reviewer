@@ -54,6 +54,26 @@ test("network follow-up reuses the original reviewer and review context", async 
   );
   assert.equal(result.kind, "assessment");
   assert.equal(payload.request.input.command, "git fetch origin");
-  assert.match(payload.request.policyReason, /github\.com/);
-  assert.match(payload.request.policyReason, /read-only fetch/);
+  assert.match(JSON.stringify(payload.continuation), /github\.com/);
+  assert.match(JSON.stringify(payload.continuation), /read-only fetch/);
+});
+
+test("reviewer transcripts carry the prior assessment into a local continuation", async () => {
+  const contexts: any[] = [];
+  const model = { provider: "test", id: "reviewer" };
+  const { createReviewerTranscript, invokeModelReviewer } = await import("../src/reviewer.ts");
+  const transcript = createReviewerTranscript();
+  const registry = {
+    find: () => model,
+    hasConfiguredAuth: () => true,
+    complete: async (_model: unknown, context: any) => {
+      contexts.push(context);
+      return { stopReason: "stop", content: [{ type: "text", text: '{"decision":"allow","reason":"ok"}' }] };
+    },
+  } as any;
+  const request = { tool: "bash", input: { command: "pwd" }, cwd: "/w", minimumLevel: 0 };
+  await invokeModelReviewer(registry, { reviewer: { level: 0, model: "test/reviewer" } }, request, undefined, undefined, { transcript });
+  await invokeNetworkReviewer(registry, { level: 0, model: "test/reviewer" }, request, { decision: "allow", reason: "ok" }, { host: "github.com", port: 443 }, undefined, undefined, { transcript });
+  assert.equal(contexts[1].messages.length, 3);
+  assert.equal(transcript.messages.length, 4);
 });

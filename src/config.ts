@@ -14,7 +14,16 @@ import type {
   ReviewerConfig,
 } from "./types.ts";
 
-const DEFAULT_CONFIG: PermissionReviewerConfig = { reviewers: [] };
+export const DEFAULT_REVIEW_CONTEXT = {
+  mode: "transcript",
+  conversationTokens: 4_000,
+  toolTokens: 2_000,
+  persistence: "command",
+} as const;
+const DEFAULT_CONFIG: PermissionReviewerConfig = {
+  reviewers: [],
+  reviewContext: DEFAULT_REVIEW_CONTEXT,
+};
 
 export interface LoadedConfig {
   config: PermissionReviewerConfig;
@@ -51,10 +60,33 @@ export function validateConfig(value: unknown): PermissionReviewerConfig {
   if (value.policy !== undefined && typeof value.policy !== "string") {
     throw new Error("policy must be a string");
   }
+  const reviewContext = validateReviewContext(value.reviewContext);
   return {
     reviewers,
+    reviewContext,
     ...(value.policy ? { policy: value.policy } : {}),
   };
+}
+
+function validateReviewContext(value: unknown): NonNullable<PermissionReviewerConfig["reviewContext"]> {
+  if (value === undefined) return { ...DEFAULT_REVIEW_CONTEXT };
+  if (!isRecord(value)) throw new Error("reviewContext must be an object");
+  const mode = value.mode ?? DEFAULT_REVIEW_CONTEXT.mode;
+  const persistence = value.persistence ?? DEFAULT_REVIEW_CONTEXT.persistence;
+  if (mode !== "transcript" && mode !== "metadata") {
+    throw new Error("reviewContext.mode must be transcript or metadata");
+  }
+  if (persistence !== "command" && persistence !== "session") {
+    throw new Error("reviewContext.persistence must be command or session");
+  }
+  const conversationTokens = value.conversationTokens ?? DEFAULT_REVIEW_CONTEXT.conversationTokens;
+  const toolTokens = value.toolTokens ?? DEFAULT_REVIEW_CONTEXT.toolTokens;
+  for (const [name, tokens] of [["conversationTokens", conversationTokens], ["toolTokens", toolTokens]] as const) {
+    if (!Number.isSafeInteger(tokens) || Number(tokens) < 0 || Number(tokens) > 100_000) {
+      throw new Error(`reviewContext.${name} must be an integer from 0 to 100000`);
+    }
+  }
+  return { mode, persistence, conversationTokens: Number(conversationTokens), toolTokens: Number(toolTokens) };
 }
 
 export function saveConfig(

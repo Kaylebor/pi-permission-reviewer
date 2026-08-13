@@ -12,6 +12,14 @@ export interface ReviewerConfig {
 export interface PermissionReviewerConfig {
   reviewers: ReviewerConfig[];
   policy?: string;
+  reviewContext?: ReviewContextConfig;
+}
+
+export interface ReviewContextConfig {
+  mode: "transcript" | "metadata";
+  conversationTokens: number;
+  toolTokens: number;
+  persistence: "command" | "session";
 }
 
 export interface ReviewRequest {

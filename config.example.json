@@ -1,4 +1,10 @@
 {
   "reviewers": [],
+  "reviewContext": {
+    "mode": "transcript",
+    "conversationTokens": 4000,
+    "toolTokens": 2000,
+    "persistence": "command"
+  },
   "policy": "Escalate whenever the exact effects or authorization are unclear."
 }

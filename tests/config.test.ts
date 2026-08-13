@@ -14,6 +14,29 @@ test("accepts tied and sparse reviewer levels", () => {
     ],
   });
   assert.deepEqual(config.reviewers.map(({ level }) => level), [0, 0, 10]);
+  assert.deepEqual(config.reviewContext, {
+    mode: "transcript",
+    conversationTokens: 4_000,
+    toolTokens: 2_000,
+    persistence: "command",
+  });
+});
+
+test("validates provider-neutral review context settings", () => {
+  const config = validateConfig({
+    reviewers: [],
+    reviewContext: {
+      mode: "metadata",
+      conversationTokens: 1200,
+      toolTokens: 600,
+      persistence: "session",
+    },
+  });
+  assert.equal(config.reviewContext?.persistence, "session");
+  assert.throws(
+    () => validateConfig({ reviewers: [], reviewContext: { mode: "raw" } }),
+    /mode must be transcript or metadata/,
+  );
 });
 
 test("rejects malformed model specs", () => {

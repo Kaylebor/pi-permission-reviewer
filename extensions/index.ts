@@ -9,7 +9,8 @@ import { join } from "node:path";
 import { ApprovalStore, createReviewCase } from "../src/approval-store.ts";
 import { classifyBash } from "../src/classifier.ts";
 import { handleConfigCommand } from "../src/config-ui.ts";
-import { loadConfig } from "../src/config.ts";
+import { DEFAULT_REVIEW_CONTEXT, loadConfig } from "../src/config.ts";
+import { ContextLedger, type ReviewContextEvidence } from "../src/context-ledger.ts";
 import { lockToolInput } from "../src/input-lock.ts";
 import { runReviewLevels } from "../src/levels.ts";
 import {
@@ -18,8 +19,10 @@ import {
 } from "../src/reactive-sandbox.ts";
 import { createPiPermAdapter } from "../src/pi-perm-adapter.ts";
 import {
+  createReviewerTranscript,
   invokeModelReviewer,
   invokeNetworkReviewer,
+  type ReviewerTranscript,
 } from "../src/reviewer.ts";
 import type { ApprovalCapability, NetworkDecision, ReviewCase } from "../src/review-types.ts";
 import type {
@@ -31,7 +34,12 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   let loaded = loadConfig();
   let configGeneration = 0;
   let sessionEpoch = 0;
+  let reviewerLifecycle = new AbortController();
+  const contextLedger = new ContextLedger();
   const approvals = new ApprovalStore();
+  const reviewerTranscripts = new Map<string, ReviewerTranscript>();
+  const reviewerQueues = new Map<string, Promise<void>>();
+  const caseEvidence = new Map<string, ReviewContextEvidence>();
   const activeExecutions = new Map<string, AbortController>();
   const permissions = await createPiPermAdapter({
     cwd: process.cwd(),
@@ -52,7 +60,6 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     return;
   }
   const createBashToolDefinition = PiAgent.createBashToolDefinition;
-  let latestDirectUserInput: string | undefined;
   let activeSandboxWorkers = 0;
 
   const bashTool = createBashToolDefinition(permissions.initialCwd);
@@ -96,6 +103,11 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
                   ctx,
                   reviewSignal,
                   configGeneration,
+                  loaded.config.reviewers,
+                  caseEvidence.get(capability.reviewCase.id),
+                  loaded.config.reviewContext?.persistence ?? "command",
+                  reviewerTranscripts,
+                  reviewerQueues,
                 ),
               onNetworkDecision: (decision, destination) => {
                 if (decision.decision === "deny") {
@@ -122,20 +134,30 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         );
       } finally {
         activeExecutions.delete(toolCallId);
+        caseEvidence.delete(capability.reviewCase.id);
+        if ((loaded.config.reviewContext?.persistence ?? "command") === "command") {
+          deleteCaseTranscripts(reviewerTranscripts, capability.reviewCase.id);
+        }
         activeSandboxWorkers -= 1;
       }
     },
   });
 
-  pi.on("input", (event) => {
-    if (event.source === "interactive" || event.source === "rpc") {
-      latestDirectUserInput = event.text;
-    }
+  pi.on("context", (event) => {
+    contextLedger.captureContext(event.messages);
+  });
+  pi.on("message_end", (event) => {
+    contextLedger.captureMessageEnd(event.message);
   });
 
   pi.on("session_start", async (_event, ctx) => {
     sessionEpoch += 1;
-    latestDirectUserInput = undefined;
+    reviewerLifecycle.abort(new Error("Pi session changed"));
+    reviewerLifecycle = new AbortController();
+    contextLedger.clear();
+    reviewerTranscripts.clear();
+    reviewerQueues.clear();
+    caseEvidence.clear();
     approvals.clearAll();
     for (const controller of activeExecutions.values()) controller.abort();
     activeExecutions.clear();
@@ -151,7 +173,12 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     sessionEpoch += 1;
-    latestDirectUserInput = undefined;
+    reviewerLifecycle.abort(new Error("Pi session ended"));
+    reviewerLifecycle = new AbortController();
+    contextLedger.clear();
+    reviewerTranscripts.clear();
+    reviewerQueues.clear();
+    caseEvidence.clear();
     approvals.clearAll();
     for (const controller of activeExecutions.values()) controller.abort();
     activeExecutions.clear();
@@ -194,7 +221,6 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       cwd: ctx.cwd,
       minimumLevel: classification.minimumLevel,
       policyReason: permissionDecision?.reason ?? classification.reason,
-      ...(latestDirectUserInput ? { directUserInput: latestDirectUserInput } : {}),
     };
     let reviewCase: ReviewCase;
     try {
@@ -224,6 +250,11 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     }
     const reviewConfig = loaded;
     const reviewGeneration = configGeneration;
+    const reviewSignal = ctx.signal
+      ? AbortSignal.any([ctx.signal, reviewerLifecycle.signal])
+      : reviewerLifecycle.signal;
+    const contextOptions = reviewConfig.config.reviewContext ?? DEFAULT_REVIEW_CONTEXT;
+    const evidence = contextLedger.buildEvidence(contextOptions);
     if (!reviewConfig.valid) {
       return humanReview(
         event,
@@ -237,24 +268,35 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       reviewers: reviewConfig.config.reviewers,
       minimumLevel: request.minimumLevel,
       invoke: (invocation) =>
-        invokeModelReviewer(
-          ctx.modelRegistry,
-          invocation,
-          request,
-          reviewConfig.config.policy,
-          ctx.signal,
-        ),
+        invokeWithReviewerHistory({
+          caseId: reviewCase.id,
+          reviewer: invocation.reviewer,
+          persistence: contextOptions.persistence,
+          transcripts: reviewerTranscripts,
+          queues: reviewerQueues,
+          invoke: (transcript) => invokeModelReviewer(
+            ctx.modelRegistry,
+            invocation,
+            request,
+            reviewConfig.config.policy,
+            reviewSignal,
+            { evidence, transcript },
+          ),
+        }),
     });
     if (configGeneration !== reviewGeneration) {
-      return humanReview(
+      const result = await humanReview(
         event,
         request,
         ctx,
         "Reviewer configuration changed while this action was under review",
         () => approvals.remember({ reviewCase, request }),
       );
+      if (result?.block) cleanupCaseState(reviewCase.id, reviewerTranscripts, caseEvidence);
+      return result;
     }
     if (reviewed.decision === "allow") {
+      caseEvidence.set(reviewCase.id, evidence);
       const decided = [...reviewed.attempts]
         .reverse()
         .find(
@@ -268,18 +310,23 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
               candidate.level === decided.level && candidate.model === decided.model,
           )
         : undefined;
-      return allowOnce(event, approvals, {
+      const result = allowOnce(event, approvals, {
         reviewCase,
         request,
         ...(reviewer ? { reviewer } : {}),
         ...(decided?.assessment ? { assessment: decided.assessment } : {}),
       }, "Approved");
+      if (result?.block) cleanupCaseState(reviewCase.id, reviewerTranscripts, caseEvidence);
+      return result;
     }
     if (reviewed.decision === "deny") {
+      cleanupCaseState(reviewCase.id, reviewerTranscripts, caseEvidence);
       return { block: true, reason: reviewed.reason, terminate: true };
     }
-    return humanReview(event, request, ctx, reviewed.reason, () =>
+    const result = await humanReview(event, request, ctx, reviewed.reason, () =>
       approvals.remember({ reviewCase, request }));
+    if (result?.block) cleanupCaseState(reviewCase.id, reviewerTranscripts, caseEvidence);
+    return result;
   });
 
   pi.registerCommand("permission-reviewer", {
@@ -297,6 +344,11 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         setLoaded: (next) => {
           loaded = next;
           configGeneration += 1;
+          reviewerLifecycle.abort(new Error("Reviewer configuration changed"));
+          reviewerLifecycle = new AbortController();
+          reviewerTranscripts.clear();
+          reviewerQueues.clear();
+          caseEvidence.clear();
           approvals.clearAll();
           for (const controller of activeExecutions.values()) controller.abort();
         },
@@ -337,6 +389,11 @@ async function reviewNetworkRequest(
   ctx: ExtensionContext,
   signal: AbortSignal | undefined,
   currentConfigGeneration: number,
+  reviewers: ReviewerConfig[],
+  evidence: ReviewContextEvidence | undefined,
+  persistence: "command" | "session",
+  transcripts: Map<string, ReviewerTranscript>,
+  queues: Map<string, Promise<void>>,
 ): Promise<NetworkDecision> {
   const caseId = approved.reviewCase.id;
   const deny = (source: NetworkDecision["source"], reason: string): NetworkDecision =>
@@ -349,32 +406,42 @@ async function reviewNetworkRequest(
   if (approved.reviewCase.configGeneration !== currentConfigGeneration) {
     reason = "Reviewer configuration changed after the command was approved";
   } else if (approved.reviewer && approved.assessment) {
-    const result = await invokeNetworkReviewer(
-      ctx.modelRegistry,
-      approved.reviewer,
-      approved.request,
-      approved.assessment,
-      destination,
-      approved.reviewCase.policy,
-      signal,
-    );
-    if (result.kind === "assessment") {
-      if (result.assessment.decision === "allow") {
-        return {
-          decision: "allow",
-          source: "reviewer",
-          reason: result.assessment.reason,
-          caseId,
-          reviewer: approved.reviewer.model,
-        };
-      }
-      if (result.assessment.decision === "deny") {
-        return deny("reviewer", result.assessment.reason);
-      }
-      reason = result.assessment.reason;
-    } else {
-      reason = result.error;
+    const ordered = orderReactiveReviewers(reviewers, approved.reviewer);
+    const reviewed = await runReviewLevels({
+      reviewers: ordered,
+      minimumLevel: approved.reviewer.level,
+      invoke: (invocation) => invokeWithReviewerHistory({
+        caseId,
+        reviewer: invocation.reviewer,
+        persistence,
+        transcripts,
+        queues,
+        invoke: (transcript) => invokeNetworkReviewer(
+          ctx.modelRegistry,
+          invocation.reviewer,
+          approved.request,
+          approved.assessment!,
+          destination,
+          approved.reviewCase.policy,
+          signal,
+          { evidence, transcript },
+        ),
+      }),
+    });
+    if (reviewed.decision === "allow") {
+      const winner = [...reviewed.attempts].reverse().find(
+        (attempt) => attempt.status === "decided" && attempt.assessment?.decision === "allow",
+      );
+      return {
+        decision: "allow",
+        source: "reviewer",
+        reason: reviewed.reason,
+        caseId,
+        ...(winner ? { reviewer: winner.model } : {}),
+      };
     }
+    if (reviewed.decision === "deny") return deny("reviewer", reviewed.reason);
+    reason = reviewed.reason;
   }
   if (!ctx.hasUI || signal?.aborted) return deny("human", reason);
   const allowed = await ctx.ui.confirm(
@@ -388,6 +455,73 @@ async function reviewNetworkRequest(
     reason: allowed ? "destination approved by user" : "destination denied by user",
     caseId,
   };
+}
+
+function orderReactiveReviewers(
+  reviewers: ReviewerConfig[],
+  winner: ReviewerConfig,
+): ReviewerConfig[] {
+  return [
+    winner,
+    ...reviewers.filter((reviewer) =>
+      reviewer.model !== winner.model && reviewer.level >= winner.level),
+  ];
+}
+
+async function invokeWithReviewerHistory<T>(options: {
+  caseId: string;
+  reviewer: ReviewerConfig;
+  persistence: "command" | "session";
+  transcripts: Map<string, ReviewerTranscript>;
+  queues: Map<string, Promise<void>>;
+  invoke(transcript: ReviewerTranscript): Promise<T>;
+}): Promise<T> {
+  const identity = reviewerIdentity(options.reviewer);
+  const key = options.persistence === "session"
+    ? `session:${identity}`
+    : `case:${options.caseId}:${identity}`;
+  const transcript = options.transcripts.get(key) ?? createReviewerTranscript();
+  options.transcripts.set(key, transcript);
+  if (options.persistence === "command") return options.invoke(transcript);
+  const previous = options.queues.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.then(() => current);
+  options.queues.set(key, tail);
+  await previous;
+  try {
+    return await options.invoke(transcript);
+  } finally {
+    release();
+    if (options.queues.get(key) === tail) options.queues.delete(key);
+  }
+}
+
+function reviewerIdentity(reviewer: ReviewerConfig): string {
+  return JSON.stringify({
+    model: reviewer.model,
+    reasoning: reviewer.reasoning ?? "low",
+    timeoutMs: reviewer.timeoutMs ?? 60_000,
+  });
+}
+
+function deleteCaseTranscripts(
+  transcripts: Map<string, ReviewerTranscript>,
+  caseId: string,
+): void {
+  const prefix = `case:${caseId}:`;
+  for (const key of transcripts.keys()) {
+    if (key.startsWith(prefix)) transcripts.delete(key);
+  }
+}
+
+function cleanupCaseState(
+  caseId: string,
+  transcripts: Map<string, ReviewerTranscript>,
+  evidence: Map<string, ReviewContextEvidence>,
+): void {
+  deleteCaseTranscripts(transcripts, caseId);
+  evidence.delete(caseId);
 }
 
 export function isEligibleReactiveDestination(destination: {

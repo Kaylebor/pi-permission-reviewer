@@ -78,3 +78,47 @@ test("configure UI adds a provider-neutral reviewer and updates live state", asy
     else process.env.PI_PERMISSION_REVIEWER_CONFIG = previous;
   }
 });
+
+test("configure UI exposes context detail, budgets, and persistence", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-ui-"));
+  const path = join(directory, "config.json");
+  const previous = process.env.PI_PERMISSION_REVIEWER_CONFIG;
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = path;
+  let loaded = loadConfig(path);
+  const selections = [
+    "Configure review context",
+    "metadata — aggregate counts only",
+    "session — serialized reviewer trunk for the Pi session",
+  ];
+  const inputs = ["1200", "600"];
+  try {
+    await handleConfigCommand(
+      "configure",
+      {
+        hasUI: true,
+        scopedModels: [],
+        modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false },
+        ui: {
+          select: async () => selections.shift(),
+          input: async () => inputs.shift(),
+          editor: async () => undefined,
+          confirm: async () => false,
+          notify() {},
+        },
+      } as any,
+      {
+        getLoaded: () => loaded,
+        setLoaded: (next) => { loaded = next; },
+      },
+    );
+    assert.deepEqual(loaded.config.reviewContext, {
+      mode: "metadata",
+      persistence: "session",
+      conversationTokens: 1200,
+      toolTokens: 600,
+    });
+  } finally {
+    if (previous === undefined) delete process.env.PI_PERMISSION_REVIEWER_CONFIG;
+    else process.env.PI_PERMISSION_REVIEWER_CONFIG = previous;
+  }
+});
