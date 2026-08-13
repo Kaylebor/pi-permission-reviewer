@@ -176,6 +176,37 @@ test("a skipped command is locked against later handler mutation", async () => {
   }, TypeError);
 });
 
+test("the registered bash executor refuses calls without a one-use capability", async () => {
+  const runtime = mkdtempSync(
+    join(tmpdir(), "pi-permission-reviewer-runtime-"),
+  );
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  let registeredTool: { execute: (...args: any[]) => Promise<unknown> } | undefined;
+  const pi = {
+    events: { emit() {} },
+    registerTool(tool: { execute: (...args: any[]) => Promise<unknown> }) {
+      registeredTool = tool;
+    },
+    registerCommand() {},
+    on() {},
+  };
+  await permissionReviewer(pi as any);
+  assert.ok(registeredTool);
+  await assert.rejects(
+    registeredTool.execute(
+      "unreviewed-call",
+      { command: "pwd" },
+      undefined,
+      () => {},
+      { cwd: process.cwd() },
+    ),
+    /lacks a valid one-use approval capability \(missing\)/,
+  );
+});
+
 test("an allowed file tool is locked against later path mutation", async () => {
   const runtime = mkdtempSync(
     join(tmpdir(), "pi-permission-reviewer-runtime-"),

@@ -5,85 +5,44 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import * as PiAgent from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { ApprovalStore, createReviewCase } from "../src/approval-store.ts";
 import { classifyBash } from "../src/classifier.ts";
 import { handleConfigCommand } from "../src/config-ui.ts";
 import { loadConfig } from "../src/config.ts";
 import { lockToolInput } from "../src/input-lock.ts";
 import { runReviewLevels } from "../src/levels.ts";
 import {
-  hardenSandboxSettings,
   isPublicNetworkDestination,
   runReactiveSandbox,
 } from "../src/reactive-sandbox.ts";
+import { createPiPermAdapter } from "../src/pi-perm-adapter.ts";
 import {
   invokeModelReviewer,
   invokeNetworkReviewer,
 } from "../src/reviewer.ts";
+import type { ApprovalCapability, NetworkDecision, ReviewCase } from "../src/review-types.ts";
 import type {
-  ReviewAssessment,
   ReviewerConfig,
   ReviewRequest,
 } from "../src/types.ts";
 
-interface PiPermExtension {
-  state: { cwd: string; config: unknown; activeProfile: string };
-  handleToolCall(event: ToolCallEvent, ctx: ExtensionContext): Promise<
-    | { block?: boolean; reason?: string; terminate?: boolean }
-    | undefined
-  >;
-  createBashSpawnHook(): Parameters<typeof PiAgent.createBashToolDefinition>[1] extends
-    | { spawnHook?: infer Hook }
-    | undefined
-    ? Hook
-    : never;
-}
-
-interface ApprovedReview {
-  request: ReviewRequest;
-  configGeneration: number;
-  inputDigest: string;
-  cwd: string;
-  policy?: string;
-  reviewer?: ReviewerConfig;
-  assessment?: ReviewAssessment;
-}
-
 export default async function permissionReviewer(pi: ExtensionAPI) {
   let loaded = loadConfig();
   let configGeneration = 0;
-  const piPermRoot = dirname(fileURLToPath(import.meta.resolve("pi-perm/package.json")));
-  // pi-perm publishes TypeScript without strict-consumer declarations. Resolve it
-  // dynamically so its runtime API remains isolated behind our local contract.
-  const piPermModule = (await import(
-    "pi-perm/" + "core/extension.ts"
-  )) as {
-    createPiPermExtension(options: Record<string, unknown>): PiPermExtension;
-  };
-  const { getActiveProfile } = (await import(
-    "pi-perm/" + "core/config.ts"
-  )) as { getActiveProfile(state: unknown): unknown };
-  const { toSrtSettings } = (await import(
-    "pi-perm/" + "core/srt.ts"
-  )) as {
-    toSrtSettings(profile: unknown): Record<string, unknown>;
-  };
-  let permissions: PiPermExtension;
-  try {
-    permissions = piPermModule.createPiPermExtension({
-      cwd: process.cwd(),
-      events: pi.events,
-      // Bash execution uses the bundled SRT library worker below, not pi-perm's
-      // external `srt` CLI spawn hook.
-      commandExists: () => true,
-      extensionRoot: piPermRoot,
-      runtimeBaseDir:
-        process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR ??
-        join(homedir(), ".pi", "agent", "permission-reviewer"),
-    });
-  } catch (error) {
-    const reason = `Permission engine failed to initialize: ${error instanceof Error ? error.message : String(error)}`;
+  let sessionEpoch = 0;
+  const approvals = new ApprovalStore();
+  const activeExecutions = new Map<string, AbortController>();
+  const permissions = await createPiPermAdapter({
+    cwd: process.cwd(),
+    events: pi.events,
+    commandExists: () => true,
+    runtimeBaseDir:
+      process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR ??
+      join(homedir(), ".pi", "agent", "permission-reviewer"),
+  });
+  if (permissions.initializationError) {
+    const reason = permissions.initializationError;
     pi.on("tool_call", () => ({ block: true, reason, terminate: true }));
     pi.on("session_start", (_event, ctx) => ctx.ui.notify(reason, "error"));
     pi.registerCommand("permission-reviewer", {
@@ -94,55 +53,60 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   }
   const createBashToolDefinition = PiAgent.createBashToolDefinition;
   let latestDirectUserInput: string | undefined;
-  const approvedReviews = new Map<string, ApprovedReview>();
   let activeSandboxWorkers = 0;
-  const rememberApproval = (
-    toolCallId: string,
-    approval: Omit<ApprovedReview, "configGeneration">,
-  ) => {
-    if (approvedReviews.has(toolCallId)) return false;
-    approvedReviews.set(toolCallId, { ...approval, configGeneration });
-    setTimeout(() => approvedReviews.delete(toolCallId), 5 * 60_000).unref();
-    return true;
-  };
 
-  const bashTool = createBashToolDefinition(permissions.state.cwd);
+  const bashTool = createBashToolDefinition(permissions.initialCwd);
   pi.registerTool({
     ...bashTool,
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
       if (activeSandboxWorkers >= 4) {
         throw new Error("reactive sandbox worker limit reached");
       }
-      const approved = approvedReviews.get(toolCallId);
-      approvedReviews.delete(toolCallId);
-      if (
-        approved &&
-        (approved.inputDigest !== JSON.stringify(params) ||
-          approved.cwd !== ctx.cwd ||
-          approved.configGeneration !== configGeneration)
-      ) {
-        throw new Error("permission approval no longer matches this bash invocation");
+      const consumed = approvals.consume({
+        toolCallId,
+        tool: "bash",
+        input: params,
+        cwd: ctx.cwd,
+        configGeneration,
+        sessionEpoch,
+      });
+      if (!consumed.ok) {
+        throw new Error(`bash execution lacks a valid one-use approval capability (${consumed.reason})`);
       }
-      const invocationTool = createBashToolDefinition(permissions.state.cwd, {
+      const capability = consumed.capability;
+      const executionController = new AbortController();
+      activeExecutions.set(toolCallId, executionController);
+      const combinedSignal = signal
+        ? AbortSignal.any([signal, executionController.signal])
+        : executionController.signal;
+      const invocationTool = createBashToolDefinition(capability.reviewCase.cwd, {
         operations: {
           exec: (command, cwd, options) =>
             runReactiveSandbox({
               toolCallId,
+              caseId: capability.reviewCase.id,
               command,
               cwd,
-              settings: hardenSandboxSettings(
-                toSrtSettings(getActiveProfile(permissions.state)),
-              ),
+              settings: capability.reviewCase.sandboxSettings as Record<string, unknown>,
               onData: options.onData,
               onNetworkRequest: (destination, reviewSignal) =>
                 reviewNetworkRequest(
-                  approved,
+                  capability,
                   destination,
                   ctx,
                   reviewSignal,
                   configGeneration,
                 ),
-              ...(options.signal ? { signal: options.signal } : {}),
+              onNetworkDecision: (decision, destination) => {
+                if (decision.decision === "deny") {
+                  const detail = `[permission-reviewer] denied ${destination.host}:${destination.port ?? "?"} (${decision.source}): ${decision.reason}\n`;
+                  options.onData(Buffer.from(detail));
+                  if (ctx.hasUI) ctx.ui.notify(detail.trim(), "warning");
+                }
+              },
+              signal: options.signal
+                ? AbortSignal.any([options.signal, combinedSignal])
+                : combinedSignal,
               ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
             }),
         },
@@ -157,7 +121,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
           ctx,
         );
       } finally {
-        approvedReviews.delete(toolCallId);
+        activeExecutions.delete(toolCallId);
         activeSandboxWorkers -= 1;
       }
     },
@@ -169,7 +133,13 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
+    sessionEpoch += 1;
+    latestDirectUserInput = undefined;
+    approvals.clearAll();
+    for (const controller of activeExecutions.values()) controller.abort();
+    activeExecutions.clear();
+    await permissions.resetSession();
     for (const warning of loaded.warnings) ctx.ui.notify(warning, "warning");
     ctx.ui.notify(
       loaded.config.reviewers.length > 0
@@ -177,6 +147,15 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         : "pi-permission-reviewer loaded in human-only mode; run /permission-reviewer configure",
       "info",
     );
+  });
+
+  pi.on("session_shutdown", async () => {
+    sessionEpoch += 1;
+    latestDirectUserInput = undefined;
+    approvals.clearAll();
+    for (const controller of activeExecutions.values()) controller.abort();
+    activeExecutions.clear();
+    await permissions.resetSession();
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -209,10 +188,6 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     if (permissionDecision?.block && !confirmationRequested) {
       return { ...permissionDecision, terminate: true };
     }
-    if (!permissionDecision && classification.action === "skip") {
-      return lockAllowedInput(event, "Skipped");
-    }
-
     const request: ReviewRequest = {
       tool: event.toolName,
       input: event.input as Record<string, unknown>,
@@ -221,16 +196,31 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       policyReason: permissionDecision?.reason ?? classification.reason,
       ...(latestDirectUserInput ? { directUserInput: latestDirectUserInput } : {}),
     };
+    let reviewCase: ReviewCase;
+    try {
+      reviewCase = createReviewCase({
+        sessionEpoch,
+        configGeneration,
+        toolCallId: event.toolCallId,
+        tool: event.toolName,
+        input: event.input as Record<string, unknown>,
+        cwd: ctx.cwd,
+        minimumLevel: request.minimumLevel,
+        ...(request.policyReason ? { policyReason: request.policyReason } : {}),
+        ...(request.directUserInput ? { directUserInput: request.directUserInput } : {}),
+        ...(loaded.config.policy ? { policy: loaded.config.policy } : {}),
+        sandboxSettings: await permissions.getHardenedSrtSettings(ctx.cwd),
+      });
+    } catch (error) {
+      return { block: true, reason: `Could not snapshot the permission boundary: ${error instanceof Error ? error.message : String(error)}`, terminate: true };
+    }
+    if (!permissionDecision && classification.action === "skip") {
+      return allowOnce(event, approvals, { reviewCase, request }, "Skipped");
+    }
 
     if (classification.action === "human") {
-      return humanReview(event, request, ctx, undefined, () => {
-        rememberApproval(event.toolCallId, {
-          request,
-          inputDigest: JSON.stringify(event.input),
-          cwd: ctx.cwd,
-          policy: loaded.config.policy,
-        });
-      });
+      return humanReview(event, request, ctx, undefined, () =>
+        approvals.remember({ reviewCase, request }));
     }
     const reviewConfig = loaded;
     const reviewGeneration = configGeneration;
@@ -240,12 +230,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         request,
         ctx,
         "Reviewer configuration is invalid; automatic approval is disabled",
-        () =>
-          rememberApproval(event.toolCallId, {
-            request,
-            inputDigest: JSON.stringify(event.input),
-            cwd: ctx.cwd,
-          }),
+        () => approvals.remember({ reviewCase, request }),
       );
     }
     const reviewed = await runReviewLevels({
@@ -266,12 +251,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         request,
         ctx,
         "Reviewer configuration changed while this action was under review",
-        () =>
-          rememberApproval(event.toolCallId, {
-            request,
-            inputDigest: JSON.stringify(event.input),
-            cwd: ctx.cwd,
-          }),
+        () => approvals.remember({ reviewCase, request }),
       );
     }
     if (reviewed.decision === "allow") {
@@ -288,29 +268,18 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
               candidate.level === decided.level && candidate.model === decided.model,
           )
         : undefined;
-      const locked = lockAllowedInput(event, "Approved");
-      if (locked) return locked;
-      rememberApproval(event.toolCallId, {
+      return allowOnce(event, approvals, {
+        reviewCase,
         request,
-        inputDigest: JSON.stringify(event.input),
-        cwd: ctx.cwd,
-        policy: reviewConfig.config.policy,
         ...(reviewer ? { reviewer } : {}),
         ...(decided?.assessment ? { assessment: decided.assessment } : {}),
-      });
-      return;
+      }, "Approved");
     }
     if (reviewed.decision === "deny") {
       return { block: true, reason: reviewed.reason, terminate: true };
     }
-    return humanReview(event, request, ctx, reviewed.reason, () => {
-      rememberApproval(event.toolCallId, {
-        request,
-        inputDigest: JSON.stringify(event.input),
-        cwd: ctx.cwd,
-        policy: reviewConfig.config.policy,
-      });
-    });
+    return humanReview(event, request, ctx, reviewed.reason, () =>
+      approvals.remember({ reviewCase, request }));
   });
 
   pi.registerCommand("permission-reviewer", {
@@ -328,6 +297,8 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         setLoaded: (next) => {
           loaded = next;
           configGeneration += 1;
+          approvals.clearAll();
+          for (const controller of activeExecutions.values()) controller.abort();
         },
       }),
   });
@@ -338,7 +309,7 @@ async function humanReview(
   request: ReviewRequest,
   ctx: ExtensionContext,
   reason = request.policyReason ?? "model review requires human judgment",
-  onAllow?: () => void,
+  onAllow?: () => boolean,
 ) {
   if (!ctx.hasUI) {
     return { block: true, reason: `Human approval required: ${reason}` };
@@ -350,21 +321,32 @@ async function humanReview(
   if (!allowed) return { block: true, reason: "Denied by user", terminate: true };
   const locked = lockAllowedInput(event, "Approved");
   if (locked) return locked;
-  onAllow?.();
+  if (onAllow && !onAllow()) {
+    return {
+      block: true,
+      reason: "Approved capability collided with an existing tool call",
+      terminate: true,
+    };
+  }
   return;
 }
 
 async function reviewNetworkRequest(
-  approved: ApprovedReview | undefined,
+  approved: ApprovalCapability,
   destination: { host: string; port?: number },
   ctx: ExtensionContext,
   signal: AbortSignal | undefined,
   currentConfigGeneration: number,
-): Promise<boolean> {
-  if (!approved || signal?.aborted) return false;
-  if (!isEligibleReactiveDestination(destination)) return false;
+): Promise<NetworkDecision> {
+  const caseId = approved.reviewCase.id;
+  const deny = (source: NetworkDecision["source"], reason: string): NetworkDecision =>
+    ({ decision: "deny", source, reason, caseId });
+  if (signal?.aborted) return deny("cancelled", "network review cancelled");
+  if (!isEligibleReactiveDestination(destination)) {
+    return deny("eligibility", "destination is not eligible for reactive approval");
+  }
   let reason = "The approved process requested an off-list network destination";
-  if (approved.configGeneration !== currentConfigGeneration) {
+  if (approved.reviewCase.configGeneration !== currentConfigGeneration) {
     reason = "Reviewer configuration changed after the command was approved";
   } else if (approved.reviewer && approved.assessment) {
     const result = await invokeNetworkReviewer(
@@ -373,23 +355,39 @@ async function reviewNetworkRequest(
       approved.request,
       approved.assessment,
       destination,
-      approved.policy,
+      approved.reviewCase.policy,
       signal,
     );
     if (result.kind === "assessment") {
-      if (result.assessment.decision === "allow") return true;
-      if (result.assessment.decision === "deny") return false;
+      if (result.assessment.decision === "allow") {
+        return {
+          decision: "allow",
+          source: "reviewer",
+          reason: result.assessment.reason,
+          caseId,
+          reviewer: approved.reviewer.model,
+        };
+      }
+      if (result.assessment.decision === "deny") {
+        return deny("reviewer", result.assessment.reason);
+      }
       reason = result.assessment.reason;
     } else {
       reason = result.error;
     }
   }
-  if (!ctx.hasUI || signal?.aborted) return false;
-  return ctx.ui.confirm(
+  if (!ctx.hasUI || signal?.aborted) return deny("human", reason);
+  const allowed = await ctx.ui.confirm(
     "Network permission",
     `${reason}\n\nCommand:\n${String(approved.request.input.command ?? "")}\n\nDestination: ${destination.host}:${destination.port ?? "unknown port"}\n\nAllow this destination for this command?`,
     signal ? { signal } : undefined,
   );
+  return {
+    decision: allowed ? "allow" : "deny",
+    source: "human",
+    reason: allowed ? "destination approved by user" : "destination denied by user",
+    caseId,
+  };
 }
 
 export function isEligibleReactiveDestination(destination: {
@@ -418,4 +416,22 @@ function lockAllowedInput(event: ToolCallEvent, label: string) {
       terminate: true,
     };
   }
+}
+
+function allowOnce(
+  event: ToolCallEvent,
+  approvals: ApprovalStore,
+  capability: ApprovalCapability,
+  label: string,
+) {
+  const locked = lockAllowedInput(event, label);
+  if (locked) return locked;
+  if (!approvals.remember(capability)) {
+    return {
+      block: true,
+      reason: `${label} capability collided with an existing tool call`,
+      terminate: true,
+    };
+  }
+  return;
 }

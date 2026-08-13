@@ -7,13 +7,23 @@ import {
   runReactiveSandbox,
   sanitizedEnvironment,
 } from "../src/reactive-sandbox.ts";
+import type { NetworkDecision } from "../src/review-types.ts";
 
 const workerPath = fileURLToPath(
   new URL("./fixtures/fake-sandbox-worker.mjs", import.meta.url),
 );
 
+function networkDecision(
+  decision: NetworkDecision["decision"],
+  source: NetworkDecision["source"] = "reviewer",
+  caseId = "test-case",
+): NetworkDecision {
+  return { decision, source, caseId, reason: `${source} ${decision}` };
+}
+
 test("one host-port review resumes the original worker and is cached per command", async () => {
   let reviews = 0;
+  const decisions: Array<{ decision: NetworkDecision; destination: { host: string; port?: number } }> = [];
   const output: Buffer[] = [];
   const result = await runReactiveSandbox({
     toolCallId: "reactive-allow",
@@ -25,16 +35,22 @@ test("one host-port review resumes the original worker and is cached per command
     onNetworkRequest: async (request) => {
       reviews += 1;
       assert.deepEqual(request, { host: "example.com", port: 443 });
-      return true;
+      return networkDecision("allow", "reviewer", "reactive-allow");
     },
+    onNetworkDecision: (decision, destination) => decisions.push({ decision, destination }),
   });
   assert.equal(reviews, 1);
+  assert.deepEqual(decisions, [{
+    decision: networkDecision("allow", "reviewer", "reactive-allow"),
+    destination: { host: "example.com", port: 443 },
+  }]);
   assert.equal(result.exitCode, 0);
   assert.equal(Buffer.concat(output).toString(), "continued");
 });
 
 test("a mismatched tool-call request fails closed", async () => {
   let reviewed = false;
+  const decisions: NetworkDecision[] = [];
   await assert.rejects(
     runReactiveSandbox({
       toolCallId: "reactive-invalid",
@@ -45,13 +61,40 @@ test("a mismatched tool-call request fails closed", async () => {
       onData() {},
       onNetworkRequest: async () => {
         reviewed = true;
-        return true;
+        return networkDecision("allow");
       },
+      onNetworkDecision: (decision) => decisions.push(decision),
       timeout: 0.05,
     }),
     /invalid request denied/,
   );
   assert.equal(reviewed, false);
+  assert.deepEqual(decisions, [
+    {
+      decision: "deny",
+      source: "error",
+      reason: "invalid network request",
+      caseId: "reactive-invalid",
+    },
+  ]);
+});
+
+test("only an allow decision crosses the Boolean worker IPC boundary", async () => {
+  const decisions: NetworkDecision[] = [];
+  await assert.rejects(
+    runReactiveSandbox({
+      toolCallId: "reactive-deny",
+      command: "deny",
+      cwd: process.cwd(),
+      settings: {},
+      workerPath,
+      onData() {},
+      onNetworkRequest: async () => networkDecision("deny", "policy", "reactive-deny"),
+      onNetworkDecision: (decision) => decisions.push(decision),
+    }),
+    /network request denied/,
+  );
+  assert.deepEqual(decisions, [networkDecision("deny", "policy", "reactive-deny")]);
 });
 
 test("abort denies a pending network request and terminates the worker", async () => {
@@ -64,7 +107,7 @@ test("abort denies a pending network request and terminates the worker", async (
     workerPath,
     signal: controller.signal,
     onData() {},
-    onNetworkRequest: async () => new Promise<boolean>(() => {}),
+    onNetworkRequest: async () => new Promise<NetworkDecision>(() => {}),
   });
   setTimeout(() => controller.abort(), 20);
   await assert.rejects(running, /aborted/);
@@ -123,10 +166,10 @@ test("a timed-out review is aborted before the queue advances", async () => {
     networkReviewTimeoutMs: 10,
     onData() {},
     onNetworkRequest: async (_request, signal) =>
-      new Promise<boolean>((resolve) => {
+      new Promise<NetworkDecision>((resolve) => {
         signal.addEventListener("abort", () => {
           aborted = true;
-          resolve(false);
+          resolve(networkDecision("allow"));
         }, { once: true });
       }),
   });
@@ -144,10 +187,10 @@ test("command settlement aborts an in-flight network review", async () => {
     workerPath,
     onData() {},
     onNetworkRequest: async (_request, signal) =>
-      new Promise<boolean>((resolve) => {
+      new Promise<NetworkDecision>((resolve) => {
         signal.addEventListener("abort", () => {
           aborted = true;
-          resolve(false);
+          resolve(networkDecision("allow"));
         }, { once: true });
       }),
   });
@@ -159,6 +202,7 @@ test("network reviews are serialized and capped per invocation", async () => {
   let active = 0;
   let maximumActive = 0;
   let reviews = 0;
+  const decisions: Array<{ decision: NetworkDecision; destination: { host: string; port?: number } }> = [];
   await runReactiveSandbox({
     toolCallId: "reactive-many",
     command: "many",
@@ -173,9 +217,22 @@ test("network reviews are serialized and capped per invocation", async () => {
       maximumActive = Math.max(maximumActive, active);
       await new Promise((resolve) => setTimeout(resolve, 10));
       active -= 1;
-      return true;
+      return networkDecision("allow", "reviewer", "reactive-many");
     },
+    onNetworkDecision: (decision, destination) => decisions.push({ decision, destination }),
   });
   assert.equal(reviews, 2);
   assert.equal(maximumActive, 1);
+  assert.deepEqual(
+    decisions.find(({ destination }) => destination.host === "three.example"),
+    {
+      decision: {
+        decision: "deny",
+        source: "limit",
+        reason: "network destination review limit reached",
+        caseId: "reactive-many",
+      },
+      destination: { host: "three.example", port: 443 },
+    },
+  );
 });

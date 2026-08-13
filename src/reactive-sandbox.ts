@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
+import type { NetworkDecision } from "./review-types.ts";
 
 export interface NetworkRequest {
   host: string;
@@ -27,7 +28,19 @@ export async function runReactiveSandbox(options: {
   cwd: string;
   settings: Record<string, unknown>;
   onData(data: Buffer): void;
-  onNetworkRequest(request: NetworkRequest, signal: AbortSignal): Promise<boolean>;
+  /**
+   * The caller owns eligibility, policy, reviewer, and human decisions. This
+   * transport only converts the resulting decision to the worker's Boolean
+   * IPC protocol at the final boundary.
+   */
+  onNetworkRequest(
+    request: NetworkRequest,
+    signal: AbortSignal,
+  ): Promise<NetworkDecision>;
+  /** Receives each first decision for observability without affecting IPC. */
+  onNetworkDecision?(decision: NetworkDecision, destination: NetworkRequest): void;
+  /** Stable ReviewCase id when available; toolCallId remains a safe fallback. */
+  caseId?: string;
   signal?: AbortSignal;
   timeout?: number;
   workerPath?: string;
@@ -47,10 +60,11 @@ export async function runReactiveSandbox(options: {
       windowsHide: true,
     },
   );
-  const decisions = new Map<string, Promise<boolean>>();
+  const decisions = new Map<string, Promise<NetworkDecision>>();
   let decisionQueue = Promise.resolve();
   const invocationNonce = randomUUID();
   const reviewLifecycle = new AbortController();
+  const caseId = options.caseId ?? options.toolCallId;
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -72,7 +86,10 @@ export async function runReactiveSandbox(options: {
     const sendWorker = (message: Record<string, unknown>) => {
       if (!worker.connected) return;
       worker.send(message, (error) => {
-        if (error && !settled && !options.signal?.aborted) settle(error);
+        if (error && !settled && !options.signal?.aborted) {
+          terminateWorker();
+          settle(error);
+        }
       });
     };
     const onAbort = () => {
@@ -83,9 +100,13 @@ export async function runReactiveSandbox(options: {
     };
     options.signal?.addEventListener("abort", onAbort, { once: true });
     worker.stderr?.on("data", (data) => options.onData(Buffer.from(data)));
-    worker.on("error", (error) => settle(error));
+    worker.on("error", (error) => {
+      terminateWorker();
+      settle(error);
+    });
     worker.on("exit", (code, signal) => {
       if (!settled) {
+        terminateWorker();
         settle(
           new Error(
             options.signal?.aborted
@@ -117,6 +138,7 @@ export async function runReactiveSandbox(options: {
         return;
       }
       if (message.type === "network-request") {
+        const invalidDestination = diagnosticDestination(message);
         if (
           message.toolCallId !== options.toolCallId ||
           typeof message.requestId !== "string" ||
@@ -125,12 +147,11 @@ export async function runReactiveSandbox(options: {
           (message.port !== undefined && !validPort(message.port))
         ) {
           if (typeof message.requestId === "string") {
-            sendWorker({
-              type: "network-response",
-              invocationNonce,
-              requestId: message.requestId,
-              allow: false,
-            });
+            respondToNetworkRequest(
+              message.requestId,
+              denyNetworkDecision(caseId, "error", "invalid network request"),
+              invalidDestination,
+            );
           }
           return;
         }
@@ -139,24 +160,26 @@ export async function runReactiveSandbox(options: {
           ...(message.port !== undefined ? { port: message.port } : {}),
         });
         if (!canonical) {
-          sendWorker({
-            type: "network-response",
-            invocationNonce,
-            requestId: message.requestId,
-            allow: false,
-          });
+          respondToNetworkRequest(
+            message.requestId,
+            denyNetworkDecision(caseId, "error", "invalid network destination"),
+            invalidDestination,
+          );
           return;
         }
         const key = `${canonical.host}:${canonical.port ?? "*"}`;
         let decision = decisions.get(key);
         if (!decision) {
           if (decisions.size >= (options.networkRequestLimit ?? 8)) {
-            sendWorker({
-              type: "network-response",
-              invocationNonce,
-              requestId: message.requestId,
-              allow: false,
-            });
+            respondToNetworkRequest(
+              message.requestId,
+              denyNetworkDecision(
+                caseId,
+                "limit",
+                "network destination review limit reached",
+              ),
+              canonical,
+            );
             return;
           } else {
             const reviewController = new AbortController();
@@ -165,19 +188,52 @@ export async function runReactiveSandbox(options: {
               reviewController.signal,
             ]);
             decision = decisionQueue.then(async () => {
-              if (reviewSignal.aborted || settled) return false;
+              if (reviewLifecycle.signal.aborted || settled) {
+                return denyNetworkDecision(caseId, "cancelled", "network review cancelled");
+              }
               const timeout = setTimeout(
                 () => reviewController.abort(new Error("network review timed out")),
                 options.networkReviewTimeoutMs ?? 30_000,
               );
               timeout.unref();
               try {
-                return await options.onNetworkRequest(canonical, reviewSignal);
+                const response = await options.onNetworkRequest(canonical, reviewSignal);
+                if (reviewController.signal.aborted) {
+                  return denyNetworkDecision(caseId, "timeout", "network review timed out");
+                }
+                if (reviewLifecycle.signal.aborted || settled) {
+                  return denyNetworkDecision(caseId, "cancelled", "network review cancelled");
+                }
+                if (!isNetworkDecision(response)) {
+                  return denyNetworkDecision(
+                    caseId,
+                    "error",
+                    "network reviewer returned an invalid decision",
+                  );
+                }
+                if (response.caseId !== caseId) {
+                  return denyNetworkDecision(
+                    caseId,
+                    "error",
+                    "network decision does not match the active review case",
+                  );
+                }
+                return response;
               } catch {
-                return false;
+                if (reviewController.signal.aborted) {
+                  return denyNetworkDecision(caseId, "timeout", "network review timed out");
+                }
+                if (reviewLifecycle.signal.aborted || settled) {
+                  return denyNetworkDecision(caseId, "cancelled", "network review cancelled");
+                }
+                return denyNetworkDecision(caseId, "error", "network reviewer failed");
               } finally {
                 clearTimeout(timeout);
               }
+            });
+            decision = decision.then((resolved) => {
+              notifyNetworkDecision(options, resolved, canonical);
+              return resolved;
             });
             decisionQueue = decision.then(
               () => undefined,
@@ -187,13 +243,13 @@ export async function runReactiveSandbox(options: {
           decisions.set(key, decision);
         }
         void decision
-          .then((allow) => {
+          .then((resolved) => {
             if (!settled && !reviewLifecycle.signal.aborted) {
               sendWorker({
                 type: "network-response",
                 invocationNonce,
                 requestId: message.requestId,
-                allow,
+                allow: resolved.decision === "allow",
               });
             }
           })
@@ -213,8 +269,24 @@ export async function runReactiveSandbox(options: {
         settle(undefined, { exitCode: message.exitCode ?? null });
         return;
       }
-      if (message.type === "error") settle(new Error(message.error ?? "sandbox worker failed"));
+      if (message.type === "error") {
+        terminateWorker();
+        settle(new Error(message.error ?? "sandbox worker failed"));
+      }
     });
+    const respondToNetworkRequest = (
+      requestId: string,
+      decision: NetworkDecision,
+      destination: NetworkRequest,
+    ) => {
+      notifyNetworkDecision(options, decision, destination);
+      sendWorker({
+        type: "network-response",
+        invocationNonce,
+        requestId,
+        allow: decision.decision === "allow",
+      });
+    };
     sendWorker({
       type: "start",
       invocationNonce,
@@ -227,6 +299,52 @@ export async function runReactiveSandbox(options: {
         : {}),
     });
   });
+}
+
+function denyNetworkDecision(
+  caseId: string,
+  source: Exclude<NetworkDecision["source"], "eligibility" | "policy" | "reviewer" | "human">,
+  reason: string,
+): NetworkDecision {
+  return { decision: "deny", source, reason, caseId };
+}
+
+function isNetworkDecision(value: unknown): value is NetworkDecision {
+  if (!isRecord(value)) return false;
+  return (
+    (value.decision === "allow" || value.decision === "deny") &&
+    (value.source === "eligibility" ||
+      value.source === "policy" ||
+      value.source === "reviewer" ||
+      value.source === "human" ||
+      value.source === "timeout" ||
+      value.source === "cancelled" ||
+      value.source === "error" ||
+      value.source === "limit") &&
+    typeof value.reason === "string" &&
+    typeof value.caseId === "string"
+  );
+}
+
+function notifyNetworkDecision(
+  options: { onNetworkDecision?: (decision: NetworkDecision, destination: NetworkRequest) => void },
+  decision: NetworkDecision,
+  destination: NetworkRequest,
+): void {
+  try {
+    options.onNetworkDecision?.(decision, destination);
+  } catch {
+    // Diagnostics must never prevent a completed deny decision from reaching SRT.
+  }
+}
+
+function diagnosticDestination(message: WorkerMessage): NetworkRequest {
+  return {
+    host: typeof message.host === "string" && validHost(message.host)
+      ? message.host
+      : "<invalid>",
+    ...(message.port !== undefined && validPort(message.port) ? { port: message.port } : {}),
+  };
 }
 
 export function hardenSandboxSettings(

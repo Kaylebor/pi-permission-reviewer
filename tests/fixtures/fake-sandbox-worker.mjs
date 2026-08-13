@@ -84,6 +84,17 @@ process.on("message", (message) => {
       });
       return;
     }
+    if (message.command === "deny") {
+      expectedResponses = 1;
+      send({
+        type: "network-request",
+        toolCallId: message.toolCallId,
+        requestId: "deny-1",
+        host: "example.com",
+        port: 443,
+      });
+      return;
+    }
     send({
       type: "network-request",
       toolCallId: message.toolCallId,
@@ -102,6 +113,11 @@ process.on("message", (message) => {
   if (message.type === "network-response") {
     if (message.requestId === "invalid-1") {
       send({ type: "error", error: "invalid request denied" });
+      process.disconnect();
+      return;
+    }
+    if (message.requestId === "deny-1" && message.allow !== true) {
+      send({ type: "error", error: "network request denied" });
       process.disconnect();
       return;
     }
