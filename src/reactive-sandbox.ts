@@ -197,7 +197,37 @@ export async function runReactiveSandbox(options: {
               );
               timeout.unref();
               try {
-                const response = await options.onNetworkRequest(canonical, reviewSignal);
+                const review = Promise.resolve()
+                  .then(() => options.onNetworkRequest(canonical, reviewSignal))
+                  .then(
+                    (response) => ({ kind: "response" as const, response }),
+                    () => ({ kind: "failure" as const }),
+                  );
+                const lifecycleCancelled = new Promise<{ kind: "cancelled" }>((resolve) => {
+                  reviewLifecycle.signal.addEventListener(
+                    "abort",
+                    () => resolve({ kind: "cancelled" }),
+                    { once: true },
+                  );
+                });
+                const reviewTimedOut = new Promise<{ kind: "timeout" }>((resolve) => {
+                  reviewController.signal.addEventListener(
+                    "abort",
+                    () => resolve({ kind: "timeout" }),
+                    { once: true },
+                  );
+                });
+                const outcome = await Promise.race([review, lifecycleCancelled, reviewTimedOut]);
+                if (outcome.kind === "timeout") {
+                  return denyNetworkDecision(caseId, "timeout", "network review timed out");
+                }
+                if (outcome.kind === "cancelled") {
+                  return denyNetworkDecision(caseId, "cancelled", "network review cancelled");
+                }
+                if (outcome.kind === "failure") {
+                  return denyNetworkDecision(caseId, "error", "network reviewer failed");
+                }
+                const response = outcome.response;
                 if (reviewController.signal.aborted) {
                   return denyNetworkDecision(caseId, "timeout", "network review timed out");
                 }
@@ -232,7 +262,11 @@ export async function runReactiveSandbox(options: {
               }
             });
             decision = decision.then((resolved) => {
-              notifyNetworkDecision(options, resolved, canonical);
+              // Lifecycle cancellation is cleanup, not a policy denial. Avoid
+              // reversing the causal chain in the user-facing diagnostic.
+              if (!settled && !reviewLifecycle.signal.aborted) {
+                notifyNetworkDecision(options, resolved, canonical);
+              }
               return resolved;
             });
             decisionQueue = decision.then(

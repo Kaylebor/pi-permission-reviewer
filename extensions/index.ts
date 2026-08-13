@@ -65,6 +65,10 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   const bashTool = createBashToolDefinition(permissions.initialCwd);
   pi.registerTool({
     ...bashTool,
+    promptGuidelines: [
+      ...(bashTool.promptGuidelines ?? []),
+      "Network connections may pause for permission review. Avoid short application-level wall-clock timeouts (for example curl --max-time), or leave those application-level deadlines enough review headroom when redirects or new hosts are possible.",
+    ],
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
       if (activeSandboxWorkers >= 4) {
         throw new Error("reactive sandbox worker limit reached");

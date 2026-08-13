@@ -1,13 +1,17 @@
 import { spawn } from "node:child_process";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
+import { PausableTimeout } from "./pausable-timeout.mjs";
 
 let child;
 let lifecycle = "idle";
 let requestCounter = 0;
-let timeoutHandle;
 let invocationNonce;
 const controller = new AbortController();
 const pendingNetwork = new Map();
+let configuredTimeoutMs;
+const executionTimeout = new PausableTimeout(() =>
+  void abort(`timeout:${configuredTimeoutMs / 1000}`),
+);
 
 process.on("message", (message) => {
   if (!message || typeof message !== "object") return;
@@ -34,8 +38,12 @@ async function start(message) {
     await SandboxManager.initialize(message.settings, ({ host, port }) => {
       if (!isActive() || !process.connected) return Promise.resolve(false);
       const requestId = `${message.toolCallId}:${++requestCounter}`;
+      executionTimeout.pause();
       return new Promise((resolve) => {
-        pendingNetwork.set(requestId, resolve);
+        pendingNetwork.set(requestId, (allow) => {
+          executionTimeout.resume();
+          resolve(allow);
+        });
         send({
           type: "network-request",
           toolCallId: message.toolCallId,
@@ -55,6 +63,10 @@ async function start(message) {
       { commandId: message.toolCallId, commandText: message.command },
     );
     ensureActive();
+    if (message.timeoutMs !== undefined) {
+      configuredTimeoutMs = message.timeoutMs;
+      executionTimeout.start(message.timeoutMs);
+    }
     child = spawn(descriptor.argv[0], descriptor.argv.slice(1), {
       cwd: message.cwd,
       detached: process.platform !== "win32",
@@ -71,13 +83,6 @@ async function start(message) {
       if (lifecycle === "aborting") return;
       void finish({ type: "result", exitCode: code });
     });
-    if (message.timeoutMs !== undefined) {
-      timeoutHandle = setTimeout(
-        () => void abort(`timeout:${message.timeoutMs / 1000}`),
-        message.timeoutMs,
-      );
-      timeoutHandle.unref();
-    }
   } catch (error) {
     await finishError(error instanceof Error ? error.message : String(error));
   }
@@ -107,7 +112,7 @@ async function finishError(error) {
 async function finish(message) {
   if (["finishing", "finished"].includes(lifecycle)) return;
   lifecycle = "finishing";
-  if (timeoutHandle) clearTimeout(timeoutHandle);
+  executionTimeout.stop();
   for (const resolve of pendingNetwork.values()) resolve(false);
   pendingNetwork.clear();
   if (child?.pid) await terminateProcessGroup(child.pid);

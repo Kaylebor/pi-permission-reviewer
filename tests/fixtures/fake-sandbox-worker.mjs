@@ -9,6 +9,12 @@ function send(message) {
 process.on("message", (message) => {
   if (message.type === "start") {
     invocationNonce = message.invocationNonce;
+    if (message.command === "timeout-probe") {
+      send({ type: "output", data: Buffer.from(String(message.timeoutMs)).toString("base64") });
+      send({ type: "result", exitCode: 0 });
+      process.disconnect();
+      return;
+    }
     if (message.command === "wait") {
       send({
         type: "network-request",

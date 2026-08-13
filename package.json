@@ -61,7 +61,7 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.*",
     "typecheck": "tsc -p tsconfig.json",
     "check": "npm run typecheck && npm test",
     "package:check": "npm pack --dry-run",

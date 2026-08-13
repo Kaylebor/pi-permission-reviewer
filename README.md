@@ -187,6 +187,13 @@ hosts, and other ports fail closed. DNS rebinding cannot be ruled out from
 SRT's hostname-only callback, so host approval should not be treated as content-
 or credential-aware authorization.
 
+The Pi bash `timeout` counts active sandboxed execution and pauses while a
+network permission decision is pending. Timeouts implemented by the command
+itself do not pause: for example, `curl --max-time 10` can expire while a model
+or human reviews a redirect destination. Agents are prompted to omit short
+application-level wall-clock deadlines or leave enough review headroom when a
+command may contact new hosts.
+
 The worker receives a deliberately reduced environment and adds OS-level read
 denials for common SSH, cloud, container, package-manager, Git credential, Pi,
 Codex, and macOS Keychain paths. These are defense-in-depth controls, not a
