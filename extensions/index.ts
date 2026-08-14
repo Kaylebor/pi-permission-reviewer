@@ -73,6 +73,18 @@ const guardedBashSchema = Type.Object({
   permissions: bashPermissionSchema,
 }, { additionalProperties: false });
 
+const BASH_CAPABILITY_GUIDELINE =
+  "Use bash permissions.read, permissions.publicKeyRead, permissions.write, permissions.unixSockets, or permissions.sshAgent when a contained command needs additional access. publicKeyRead accepts only a validated owner-controlled SSH .pub file and enters permission review even beneath a protected directory. Resubmit the exact command, use normalized absolute paths, and request only the minimum necessary access. Linux Unix-socket and SSH-agent requests grant all Unix sockets for that one invocation.";
+
+const MAIN_AGENT_GUIDANCE_MARKER = "<permission_reviewer_guidance>";
+const MAIN_AGENT_PERMISSION_GUIDANCE = `${MAIN_AGENT_GUIDANCE_MARKER}
+The bash tool runs commands inside a contained sandbox by default. Do not request broader access speculatively. When a command predictably needs access outside that boundary, include only the minimum exact capability in that bash call's permissions object: read, publicKeyRead, write, unixSockets, or sshAgent. Filesystem and socket paths must be normalized and absolute.
+
+Each authorization is a one-use capability bound to the exact tool call, command input, working directory, session, and current configuration. It does not change persistent policy and does not authorize retries or later commands. If a contained call fails for missing access, resubmit the unchanged command as a new call with only the indicated capability.
+
+Recognized Git operations may derive fsmonitor, validated signing-public-key, and SSH-agent capabilities automatically. Public HTTPS network access is reviewed reactively and does not require unrelated filesystem or socket permissions. On Linux, unixSockets or sshAgent exposes all Unix sockets for that one invocation, including potentially sensitive local services, so request either only when necessary.
+</permission_reviewer_guidance>`;
+
 export default async function permissionReviewer(pi: ExtensionAPI) {
   let loaded = loadConfig();
   let configGeneration = 0;
@@ -113,7 +125,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     promptGuidelines: [
       ...(bashTool.promptGuidelines ?? []),
       "Network connections may pause for permission review. Avoid short application-level wall-clock timeouts (for example curl --max-time), or leave those application-level deadlines enough review headroom when redirects or new hosts are possible.",
-      "Use bash permissions.read, permissions.publicKeyRead, permissions.write, permissions.unixSockets, or permissions.sshAgent when a contained command needs additional access. publicKeyRead accepts only a validated owner-controlled SSH .pub file and enters permission review even beneath a protected directory. Resubmit the exact command, use normalized absolute paths, and request only the minimum necessary access. Linux Unix-socket and SSH-agent requests grant all Unix sockets for that one invocation.",
+      BASH_CAPABILITY_GUIDELINE,
     ],
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
       if (activeSandboxWorkers >= 4) {
@@ -201,6 +213,16 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         activeSandboxWorkers -= 1;
       }
     },
+  });
+
+  pi.on("before_agent_start", (event) => {
+    if (!event.systemPromptOptions.selectedTools?.includes("bash")) return;
+    const effectiveBash = pi.getAllTools().find(({ name }) => name === "bash");
+    if (!effectiveBash?.promptGuidelines?.includes(BASH_CAPABILITY_GUIDELINE)) return;
+    if (event.systemPrompt.includes(MAIN_AGENT_GUIDANCE_MARKER)) return;
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${MAIN_AGENT_PERMISSION_GUIDANCE}`,
+    };
   });
 
   pi.on("context", (event) => {

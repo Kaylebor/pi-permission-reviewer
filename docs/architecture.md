@@ -22,6 +22,13 @@ calls. A `ContextLedger` follows Pi's `context` snapshots and finalized
 metadata only. Local reviewer histories contain only reviewer prompts and
 responses; they do not depend on provider-side session APIs.
 
+The extension also appends stable advisory main-agent guidance through Pi's
+`before_agent_start` system-prompt hook, but only while its guarded Bash tool is
+the effective active registration. The guidance explains structured capability
+shape, minimum-access retries, automatic Git/network handling, and one-use
+per-call authorization semantics. It is deliberately separate from enforcement
+and remains available when a custom `SYSTEM.md` bypasses tool prompt guidelines.
+
 The reviewer system prompt includes a built-in implicit-authorization rule for
 bounded, task-relevant reads of repository context, project instructions,
 installed skill definitions, and documentation. An optional trusted Markdown

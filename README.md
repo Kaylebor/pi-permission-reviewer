@@ -282,6 +282,16 @@ allow: it authorizes only that locked Pi tool call.
 
 ## Explicit Bash permissions
 
+When this package owns the effective active `bash` tool, it appends stable
+permission guidance to Pi's assembled system prompt through
+`before_agent_start`. This works even when a custom `SYSTEM.md` replaces Pi's
+default prompt and does not require users to edit `SYSTEM.md`,
+`APPEND_SYSTEM.md`, or `AGENTS.md`. The guidance describes the structured
+permission fields, minimum-access retry shape, automatic Git/network handling,
+and the fact that every authorization is a one-use per-call capability rather
+than a persistent policy change. Enforcement remains independent of this
+advisory prompt.
+
 The registered `bash` tool accepts an optional structured permission request:
 
 ```json

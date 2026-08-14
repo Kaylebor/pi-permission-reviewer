@@ -46,6 +46,10 @@
   and `permissions.sshAgent` preflight requests.
   Keep them exact-input-bound, one-use, capped, and subordinate to deterministic
   denies. Never infer them from failed-command text or retry a failed command.
+- Main-agent permission guidance is appended through `before_agent_start` only
+  while this package owns the effective active Bash tool. Keep it stable,
+  advisory, deduplicated, and explicit that capabilities are one-use per-call;
+  never rely on prompt text as an enforcement boundary.
 - SRT 0.0.71 grants bind and connect together for an exact macOS Unix-socket
   pathname and disables AF_UNIX isolation on Linux. Present the resulting
   Docker, Podman, and local-service control risk to reviewers; it does not

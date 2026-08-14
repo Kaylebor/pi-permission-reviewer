@@ -58,6 +58,49 @@ test("registered bash schema exposes strict structured permission requests", asy
   assert.match(registered.promptGuidelines?.join("\n") ?? "", /Use bash permissions\.read/);
 });
 
+test("effective guarded bash appends stable per-call capability guidance", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  let registered: { name: string; promptGuidelines?: string[] } | undefined;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  await permissionReviewer({
+    events: { emit() {} },
+    registerTool(tool: { name: string; promptGuidelines?: string[] }) {
+      registered = tool;
+    },
+    registerCommand() {},
+    getAllTools() {
+      return registered ? [{ ...registered, sourceInfo: { source: "extension" } }] : [];
+    },
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  } as any);
+  const beforeStart = handlers.get("before_agent_start")!;
+  const event = {
+    systemPrompt: "CUSTOM SYSTEM",
+    systemPromptOptions: { selectedTools: ["bash"] },
+  };
+  const result = beforeStart(event) as { systemPrompt?: string };
+  assert.match(result.systemPrompt ?? "", /<permission_reviewer_guidance>/);
+  assert.match(result.systemPrompt ?? "", /one-use capability bound to the exact tool call/);
+  assert.match(result.systemPrompt ?? "", /does not authorize retries or later commands/);
+  assert.match(result.systemPrompt ?? "", /all Unix sockets for that one invocation/);
+  assert.equal(beforeStart({
+    ...event,
+    systemPrompt: result.systemPrompt,
+  }), undefined);
+  assert.equal(beforeStart({
+    ...event,
+    systemPromptOptions: { selectedTools: ["read"] },
+  }), undefined);
+  registered!.promptGuidelines = [];
+  assert.equal(beforeStart(event), undefined);
+});
+
 test("an explicit read request forces level-zero review and stays in the bound input", async () => {
   const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
   process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
