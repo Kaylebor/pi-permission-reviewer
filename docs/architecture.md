@@ -84,9 +84,10 @@ model, reuses the winning history for reactive review, and deletes it when the
 command settles. Session persistence keeps one bounded history per model and
 serializes calls to that history. Session boundaries and configuration reloads
 clear histories, approvals, cached evidence, and pi-perm's private session
-grants; they also abort active sandbox executions.
+grants; they also abort active and FIFO-queued sandbox executions.
 
-Reactive review resumes the winning reviewer from the original permission case.
+Reactive review resumes the latest reviewer that successfully allowed the
+original permission case or a later reactive continuation.
 Its continuation reasoning is configurable and defaults to one step below the
 winner's configured effort with a low floor. The original evidence is already
 present in that local history and is not duplicated. Availability fallbacks and
@@ -129,15 +130,29 @@ to a destination approved by the reactive callback enters this second review;
 static allowlist entries remain untouched. The worker sends a bounded summary
 without query/header values or raw body bytes. An opaque, randomly keyed HMAC
 distinguishes exact request values for command-local caching but never enters a
-reviewer prompt. Incomplete body inspection is uncached and fails into another
-review. The filter returns only a Boolean-equivalent SRT allow/deny action.
-Declared GET/HEAD/OPTIONS bodies are deterministically denied because SRT cannot
-expose those bytes to the Fetch-compatible callback.
+reviewer prompt. Incomplete body inspection is uncached and enters another
+review. The default requires a final one-call human decision after Guardian
+advice; an explicit configuration may permit the reviewer ladder to decide.
+Declared GET/HEAD/OPTIONS bodies use this same incomplete-evidence path because
+SRT cannot expose their bytes to the Fetch-compatible callback. The filter
+returns only a Boolean-equivalent SRT allow/deny action.
+
+Sandbox executions use a configurable FIFO semaphore (four active workers by
+default). Completed destination and request decisions use bounded LRU caches;
+eviction causes re-review rather than command failure. In-flight decisions are
+deduplicated and serialized, with a separate high safety ceiling for malicious
+request floods. Pi's Bash timeout is paused across body inspection and review.
+Strictly formatted volatile tracing identifiers may be normalized in the opaque
+cache identity, and users may configure additional non-sensitive ignored
+headers; credentials, authority, and framing remain protected.
 
 This does not inspect response content, opaque/non-HTTP traffic, or resolved DNS
 addresses, and TLS termination is incompatible with pinning and mTLS. The host
 approval therefore remains the broader channel authority; HTTP metadata is an
 additional enforcement point for requests SRT parses, not credential-aware DLP.
+The worker pauses the command's real request and never sends a probe or duplicate
+request. DNS resolution and TLS setup may precede approval, but request contents
+are not forwarded first.
 Explicit filesystem and Unix-socket requests are preflight-only and separate
 from that live bridge; reactive local binding and curated known-host
 capabilities remain future work.

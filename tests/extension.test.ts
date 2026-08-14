@@ -30,6 +30,12 @@ test("registered bash schema exposes strict structured permission requests", asy
   const piPermConfig = join(runtime, "pi-perm.toml");
   writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
   process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const reviewerConfig = join(runtime, "reviewers.json");
+  writeFileSync(reviewerConfig, JSON.stringify({
+    reviewers: [],
+    reactiveReview: { inspection: "destination" },
+  }));
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
   let registered: { parameters: unknown; promptGuidelines?: string[] } | undefined;
   await permissionReviewer({
     events: { emit() {} },
@@ -108,6 +114,52 @@ test("effective guarded bash appends stable per-call capability guidance", async
   }), undefined);
   effectiveSourcePath = join(runtime, "competing-extension.ts");
   assert.equal(beforeStart(event), undefined);
+});
+
+test("main-agent network guidance reflects HTTP metadata and incomplete-body policy", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const reviewerConfig = join(runtime, "reviewers.json");
+  writeFileSync(reviewerConfig, JSON.stringify({
+    reviewers: [],
+    reactiveReview: {
+      inspection: "http-metadata",
+      incompleteBodyApproval: "human",
+    },
+  }));
+  const previous = process.env.PI_PERMISSION_REVIEWER_CONFIG;
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
+  try {
+    let registered: { name: string } | undefined;
+    const handlers = new Map<string, (...args: any[]) => unknown>();
+    await permissionReviewer({
+      events: { emit() {} },
+      registerTool(tool: { name: string }) { registered = tool; },
+      registerCommand() {},
+      getAllTools: () => registered ? [{
+        ...registered,
+        sourceInfo: {
+          source: "extension",
+          path: fileURLToPath(new URL("../extensions/index.ts", import.meta.url)),
+        },
+      }] : [],
+      on(name: string, handler: (...args: any[]) => unknown) { handlers.set(name, handler); },
+    } as any);
+    const result = handlers.get("before_agent_start")!({
+      systemPrompt: "SYSTEM",
+      systemPromptOptions: { selectedTools: ["bash"] },
+    }) as { systemPrompt: string };
+    assert.match(result.systemPrompt, /sanitized method, origin, route shape/);
+    assert.match(result.systemPrompt, /one-call human approval/);
+    assert.match(result.systemPrompt, /never sends a probe or duplicate request/);
+    assert.match(result.systemPrompt, /does not forward HTTP request contents upstream before approval/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_PERMISSION_REVIEWER_CONFIG;
+    else process.env.PI_PERMISSION_REVIEWER_CONFIG = previous;
+  }
 });
 
 test("session start warns when another extension owns the effective Bash tool", async () => {
@@ -239,13 +291,19 @@ test("a validated public-key capability can review an exact read beneath .ssh", 
 });
 
 test("reactive continuation lowers only above the configured floor", () => {
-  const config = { reasoning: "one-lower" as const, floor: "low" as const, inspection: "destination" as const };
+  const base = {
+    floor: "low" as const,
+    inspection: "destination" as const,
+    incompleteBodyApproval: "human" as const,
+    requestIdentityIgnoredHeaders: [],
+  };
+  const config = { ...base, reasoning: "one-lower" as const };
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "xhigh" }, config), "high");
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "medium" }, config), "low");
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "low" }, config), "low");
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "minimal" }, config), "minimal");
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "max" }, config), "xhigh");
-  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "high" }, { reasoning: "minimum", floor: "low", inspection: "destination" }), "minimal");
+  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "high" }, { ...base, reasoning: "minimum" }), "minimal");
 });
 
 test("reactive network review is limited to public-looking HTTPS", () => {

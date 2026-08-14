@@ -59,6 +59,7 @@ import {
   planExplicitBoundaries,
 } from "../src/explicit-boundary.ts";
 import { validatePublicKeyFile } from "../src/public-key-boundary.ts";
+import { ExecutionSlots } from "../src/execution-slots.ts";
 
 const bashPermissionSchema = Type.Optional(Type.Object({
   read: Type.Optional(Type.Array(Type.String({ description: "Normalized absolute path" }), { maxItems: 16 })),
@@ -82,13 +83,26 @@ const BASH_CAPABILITY_GUIDELINE =
 
 const MAIN_AGENT_GUIDANCE_MARKER = "<permission_reviewer_guidance>";
 const EXTENSION_SOURCE_PATH = realpathSync(fileURLToPath(import.meta.url));
-const MAIN_AGENT_PERMISSION_GUIDANCE = `${MAIN_AGENT_GUIDANCE_MARKER}
+function mainAgentPermissionGuidance(
+  inspection: "destination" | "http-metadata",
+  incompleteBodyApproval: "human" | "reviewer",
+): string {
+  const inspectionGuidance = inspection === "http-metadata"
+    ? `For dynamically approved public HTTPS destinations, the sandbox can pause the actual request and show reviewers sanitized method, origin, route shape, categorized header/query names, and bounded body characteristics. Raw header/query values and raw body bytes remain inside the worker. Valid bodies that cannot be completely inspected require ${incompleteBodyApproval === "human" ? "one-call human approval" : "the configured reviewer ladder"} and are never cached.`
+    : "Public HTTPS review is destination-only: reviewers cannot inspect HTTP method, path, headers, body, credentials, or the resolved IP.";
+  return `${MAIN_AGENT_GUIDANCE_MARKER}
 The bash tool runs commands inside a contained sandbox by default. Do not request broader access speculatively. When a command predictably needs access outside that boundary, include only the minimum exact capability in that bash call's permissions object: read, publicKeyRead, write, unixSockets, or sshAgent. Filesystem and socket paths must be normalized and absolute.
 
 Each authorization is a one-use capability bound to the exact tool call, command input, working directory, session, and current configuration. It does not change persistent policy and does not authorize retries or later commands. If a contained call fails for missing access, resubmit the unchanged command as a new call with only the indicated capability.
 
-Recognized Git operations may derive fsmonitor, validated signing-public-key, and SSH-agent capabilities automatically. Public HTTPS network access is reviewed reactively and does not require unrelated filesystem or socket permissions. A destination approval covers that host and port for the remainder of the command; the reviewer cannot inspect HTTP method, path, headers, body, credentials, or the resolved IP. On Linux, unixSockets or sshAgent exposes all Unix sockets for that one invocation, including potentially sensitive local services, so request either only when necessary.
+Recognized Git operations may derive fsmonitor, validated signing-public-key, and SSH-agent capabilities automatically. Public HTTPS network access is reviewed reactively and does not require unrelated filesystem or socket permissions. A destination approval covers that host and port for the remainder of the command. ${inspectionGuidance} DNS resolution and TLS setup may occur before request approval, but the extension never sends a probe or duplicate request and does not forward HTTP request contents upstream before approval. On Linux, unixSockets or sshAgent exposes all Unix sockets for that one invocation, including potentially sensitive local services, so request either only when necessary.
 </permission_reviewer_guidance>`;
+}
+
+export interface ReactiveAnchor {
+  reviewer: ReviewerConfig;
+  assessment: NonNullable<ApprovalCapability["assessment"]>;
+}
 
 export default async function permissionReviewer(pi: ExtensionAPI) {
   let loaded = loadConfig();
@@ -100,6 +114,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   const reviewerTranscripts = new Map<string, ReviewerTranscript>();
   const reviewerQueues = new Map<string, Promise<void>>();
   const caseEvidence = new Map<string, ReviewContextEvidence>();
+  const reactiveAnchors = new Map<string, ReactiveAnchor>();
   const activeExecutions = new Map<string, AbortController>();
   const permissions = await createPiPermAdapter({
     cwd: process.cwd(),
@@ -120,7 +135,9 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     return;
   }
   const createBashToolDefinition = PiAgent.createBashToolDefinition;
-  let activeSandboxWorkers = 0;
+  const executionSlots = new ExecutionSlots(
+    loaded.config.execution?.maxConcurrentSandboxes ?? 4,
+  );
 
   const bashTool = createBashToolDefinition(permissions.initialCwd);
   pi.registerTool({
@@ -133,9 +150,6 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       BASH_CAPABILITY_GUIDELINE,
     ],
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-      if (activeSandboxWorkers >= 4) {
-        throw new Error("reactive sandbox worker limit reached");
-      }
       const consumed = approvals.consume({
         toolCallId,
         tool: "bash",
@@ -148,20 +162,29 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         throw new Error(`bash execution lacks a valid one-use approval capability (${consumed.reason})`);
       }
       const capability = consumed.capability;
-      for (const boundary of capability.boundaries ?? []) {
-        if (boundary.kind === "public-key-read") {
-          validatePublicKeyFile(boundary.resource);
-        }
-      }
       const executionController = new AbortController();
       activeExecutions.set(toolCallId, executionController);
       const combinedSignal = signal
         ? AbortSignal.any([signal, executionController.signal])
         : executionController.signal;
-      const invocationTool = createBashToolDefinition(capability.reviewCase.cwd, {
-        operations: {
-          exec: async (command, cwd, options) =>
-            runReactiveSandbox({
+      let releaseSlot: (() => void) | undefined;
+      try {
+        releaseSlot = await executionSlots.acquire(combinedSignal);
+        for (const boundary of capability.boundaries ?? []) {
+          if (boundary.kind === "public-key-read") {
+            validatePublicKeyFile(boundary.resource);
+          }
+        }
+        if (capability.reviewer && capability.assessment) {
+          reactiveAnchors.set(capability.reviewCase.id, {
+            reviewer: capability.reviewer,
+            assessment: capability.assessment,
+          });
+        }
+        const invocationTool = createBashToolDefinition(capability.reviewCase.cwd, {
+          operations: {
+            exec: async (command, cwd, options) =>
+              runReactiveSandbox({
               toolCallId,
               caseId: capability.reviewCase.id,
               command,
@@ -182,6 +205,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
                   loaded.config.reviewContext?.persistence ?? "command",
                   reviewerTranscripts,
                   reviewerQueues,
+                  reactiveAnchors,
                 ),
               onNetworkDecision: (decision, destination) => {
                 if (decision.decision === "deny") {
@@ -205,6 +229,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
                   loaded.config.reviewContext?.persistence ?? "command",
                   reviewerTranscripts,
                   reviewerQueues,
+                  reactiveAnchors,
                 ),
               onHttpDecision: (decision, request) => {
                 if (decision.decision === "deny") {
@@ -213,15 +238,20 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
                   if (ctx.hasUI) ctx.ui.notify(detail.trim(), "warning");
                 }
               },
+              onHttpPolicyDenial: (reason) => {
+                const detail = `[permission-reviewer] HTTP request blocked by deterministic inspection policy: ${reason}\n`;
+                options.onData(Buffer.from(detail));
+                if (ctx.hasUI) ctx.ui.notify(detail.trim(), "warning");
+              },
               signal: options.signal
                 ? AbortSignal.any([options.signal, combinedSignal])
                 : combinedSignal,
               ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+              httpIgnoredHeaders:
+                (loaded.config.reactiveReview ?? DEFAULT_REACTIVE_REVIEW).requestIdentityIgnoredHeaders,
             }),
-        },
-      });
-      activeSandboxWorkers += 1;
-      try {
+          },
+        });
         return await invocationTool.execute(
           toolCallId,
           {
@@ -233,12 +263,13 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
           ctx,
         );
       } finally {
+        releaseSlot?.();
         activeExecutions.delete(toolCallId);
         caseEvidence.delete(capability.reviewCase.id);
+        reactiveAnchors.delete(capability.reviewCase.id);
         if ((loaded.config.reviewContext?.persistence ?? "command") === "command") {
           deleteCaseTranscripts(reviewerTranscripts, capability.reviewCase.id);
         }
-        activeSandboxWorkers -= 1;
       }
     },
   });
@@ -248,8 +279,9 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     const effectiveBash = pi.getAllTools().find(({ name }) => name === "bash");
     if (!isOwnExtensionSource(effectiveBash?.sourceInfo.path)) return;
     if (event.systemPrompt.includes(MAIN_AGENT_GUIDANCE_MARKER)) return;
+    const reactive = loaded.config.reactiveReview ?? DEFAULT_REACTIVE_REVIEW;
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${MAIN_AGENT_PERMISSION_GUIDANCE}`,
+      systemPrompt: `${event.systemPrompt}\n\n${mainAgentPermissionGuidance(reactive.inspection, reactive.incompleteBodyApproval)}`,
     };
   });
 
@@ -268,6 +300,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     reviewerTranscripts.clear();
     reviewerQueues.clear();
     caseEvidence.clear();
+    reactiveAnchors.clear();
     approvals.clearAll();
     for (const controller of activeExecutions.values()) controller.abort();
     activeExecutions.clear();
@@ -296,6 +329,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     reviewerTranscripts.clear();
     reviewerQueues.clear();
     caseEvidence.clear();
+    reactiveAnchors.clear();
     approvals.clearAll();
     for (const controller of activeExecutions.values()) controller.abort();
     activeExecutions.clear();
@@ -757,8 +791,10 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
           reviewerTranscripts.clear();
           reviewerQueues.clear();
           caseEvidence.clear();
+          reactiveAnchors.clear();
           approvals.clearAll();
           for (const controller of activeExecutions.values()) controller.abort();
+          executionSlots.setLimit(next.config.execution?.maxConcurrentSandboxes ?? 4);
         },
       }),
   });
@@ -846,7 +882,7 @@ async function humanReview(
   return;
 }
 
-async function reviewNetworkRequest(
+export async function reviewNetworkRequest(
   approved: ApprovalCapability,
   destination: { host: string; port?: number },
   ctx: ExtensionContext,
@@ -858,6 +894,7 @@ async function reviewNetworkRequest(
   persistence: "command" | "session",
   transcripts: Map<string, ReviewerTranscript>,
   queues: Map<string, Promise<void>>,
+  anchors: Map<string, ReactiveAnchor>,
 ): Promise<NetworkDecision> {
   const caseId = approved.reviewCase.id;
   const deny = (source: NetworkDecision["source"], reason: string): NetworkDecision =>
@@ -867,14 +904,19 @@ async function reviewNetworkRequest(
     return deny("eligibility", "destination is not eligible for reactive approval");
   }
   let reason = "The approved process requested an off-list network destination";
+  const anchor = anchors.get(caseId) ?? (
+    approved.reviewer && approved.assessment
+      ? { reviewer: approved.reviewer, assessment: approved.assessment }
+      : undefined
+  );
   if (approved.reviewCase.configGeneration !== currentConfigGeneration) {
     reason = "Reviewer configuration changed after the command was approved";
-  } else if (approved.reviewer && approved.assessment) {
-    const ordered = orderReactiveReviewers(reviewers, approved.reviewer);
+  } else if (anchor) {
+    const ordered = orderReactiveReviewers(reviewers, anchor.reviewer);
     const resumedWinner = ordered[0];
     const reviewed = await runReviewLevels({
       reviewers: ordered,
-      minimumLevel: approved.reviewer.level,
+      minimumLevel: anchor.reviewer.level,
       invoke: (invocation) => invokeWithReviewerHistory({
         caseId,
         reviewer: invocation.reviewer,
@@ -887,7 +929,7 @@ async function reviewNetworkRequest(
             ctx.modelRegistry,
             invocation.reviewer,
             approved.request,
-            approved.assessment!,
+            anchor.assessment,
             destination,
             approved.reviewCase.policy,
             signal,
@@ -912,6 +954,13 @@ async function reviewNetworkRequest(
       const winner = [...reviewed.attempts].reverse().find(
         (attempt) => attempt.status === "decided" && attempt.assessment?.decision === "allow",
       );
+      const winnerConfig = winner
+        ? reviewers.find((candidate) =>
+            candidate.level === winner.level && candidate.model === winner.model)
+        : undefined;
+      if (winnerConfig && winner?.assessment) {
+        anchors.set(caseId, { reviewer: winnerConfig, assessment: winner.assessment });
+      }
       return {
         decision: "allow",
         source: "reviewer",
@@ -937,7 +986,7 @@ async function reviewNetworkRequest(
   };
 }
 
-async function reviewHttpRequest(
+export async function reviewHttpRequest(
   approved: ApprovalCapability,
   request: HttpRequestSummary,
   ctx: ExtensionContext,
@@ -949,20 +998,31 @@ async function reviewHttpRequest(
   persistence: "command" | "session",
   transcripts: Map<string, ReviewerTranscript>,
   queues: Map<string, Promise<void>>,
+  anchors: Map<string, ReactiveAnchor>,
 ): Promise<NetworkDecision> {
   const caseId = approved.reviewCase.id;
   const deny = (source: NetworkDecision["source"], reason: string): NetworkDecision =>
     ({ decision: "deny", source, reason, caseId });
   if (signal?.aborted) return deny("cancelled", "HTTP request review cancelled");
-  let reason = "The approved process requested this HTTP action";
+  const incompleteBody = request.bodyPresent && request.bodyComplete !== true;
+  const humanOnlyIncomplete = incompleteBody && reactiveReview.incompleteBodyApproval === "human";
+  let reason = humanOnlyIncomplete
+    ? "The request body could not be completely inspected; Guardian advice is non-authoritative and one-call human approval is required"
+    : "The approved process requested this HTTP action";
+  const anchor = anchors.get(caseId) ?? (
+    approved.reviewer && approved.assessment
+      ? { reviewer: approved.reviewer, assessment: approved.assessment }
+      : undefined
+  );
+  let humanApprovedAnchor: ReactiveAnchor | undefined;
   if (approved.reviewCase.configGeneration !== currentConfigGeneration) {
     reason = "Reviewer configuration changed after the command was approved";
-  } else if (approved.reviewer && approved.assessment) {
-    const ordered = orderReactiveReviewers(reviewers, approved.reviewer);
+  } else if (anchor) {
+    const ordered = orderReactiveReviewers(reviewers, anchor.reviewer);
     const resumedWinner = ordered[0];
     const reviewed = await runReviewLevels({
       reviewers: ordered,
-      minimumLevel: approved.reviewer.level,
+      minimumLevel: anchor.reviewer.level,
       invoke: (invocation) => invokeWithReviewerHistory({
         caseId,
         reviewer: invocation.reviewer,
@@ -975,7 +1035,7 @@ async function reviewHttpRequest(
             ctx.modelRegistry,
             invocation.reviewer,
             approved.request,
-            approved.assessment!,
+            anchor.assessment,
             request,
             approved.reviewCase.policy,
             signal,
@@ -998,23 +1058,43 @@ async function reviewHttpRequest(
       const winner = [...reviewed.attempts].reverse().find(
         (attempt) => attempt.status === "decided" && attempt.assessment?.decision === "allow",
       );
-      return {
-        decision: "allow",
-        source: "reviewer",
-        reason: reviewed.reason,
-        caseId,
-        ...(winner ? { reviewer: winner.model } : {}),
-      };
+      const winnerConfig = winner
+        ? reviewers.find((candidate) =>
+            candidate.level === winner.level && candidate.model === winner.model)
+        : undefined;
+      if (winnerConfig && winner?.assessment) {
+        const nextAnchor = { reviewer: winnerConfig, assessment: winner.assessment };
+        if (humanOnlyIncomplete) humanApprovedAnchor = nextAnchor;
+        else anchors.set(caseId, nextAnchor);
+      }
+      if (!humanOnlyIncomplete) {
+        return {
+          decision: "allow",
+          source: "reviewer",
+          reason: reviewed.reason,
+          caseId,
+          ...(winner ? { reviewer: winner.model } : {}),
+        };
+      }
+      reason = `Guardian assessment: allow — ${reviewed.reason}. One-call human approval is still required because the request body was not completely inspected`;
     }
-    if (reviewed.decision === "deny") return deny("reviewer", reviewed.reason);
-    reason = reviewed.reason;
+    if (reviewed.decision === "deny") {
+      if (!humanOnlyIncomplete) return deny("reviewer", reviewed.reason);
+      reason = `Guardian assessment: deny — ${reviewed.reason}. A human may still make the one-call decision for this incomplete request`;
+    }
+    if (reviewed.decision !== "allow" && reviewed.decision !== "deny") {
+      reason = humanOnlyIncomplete
+        ? `${reviewed.reason}. One-call human approval is required because the request body was not completely inspected`
+        : reviewed.reason;
+    }
   }
   if (!ctx.hasUI || signal?.aborted) return deny("human", reason);
   const allowed = await ctx.ui.confirm(
     "HTTP request permission",
-    `${reason}\n\nCommand:\n${String(approved.request.input.command ?? "")}\n\nSanitized request metadata (no header/query values or raw body):\n${JSON.stringify(request, null, 2)}\n\nAllow this request shape for this command?`,
+    `${reason}\n\nCommand:\n${String(approved.request.input.command ?? "")}\n\nSanitized request metadata (no header/query values or raw body):\n${JSON.stringify(request, null, 2)}\n\n${incompleteBody ? "The unseen remainder is included in this one-call authorization but will not be cached.\n\n" : ""}Allow this request shape for this command?`,
     signal ? { signal } : undefined,
   );
+  if (allowed && humanApprovedAnchor) anchors.set(caseId, humanApprovedAnchor);
   return {
     decision: allowed ? "allow" : "deny",
     source: "human",

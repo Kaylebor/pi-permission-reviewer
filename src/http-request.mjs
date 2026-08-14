@@ -6,6 +6,30 @@ const BODYLESS_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SAFE_QUERY_NAMES = new Set(["cursor", "fields", "filter", "format", "id", "include", "lang", "limit", "locale", "offset", "order", "page", "q", "query", "search", "sort", "version"]);
 const SAFE_HEADER_NAMES = new Set(["accept", "accept-encoding", "accept-language", "cache-control", "content-length", "content-type", "host", "if-modified-since", "if-none-match", "origin", "range", "referer", "transfer-encoding", "user-agent"]);
 const SAFE_ROUTE_SEGMENTS = new Set(["account", "accounts", "admin", "api", "artifacts", "chat", "commits", "completions", "contents", "create", "delete", "download", "files", "graphql", "health", "issues", "list", "login", "logout", "metrics", "models", "oauth", "packages", "projects", "pulls", "raw", "releases", "remove", "repos", "repositories", "responses", "search", "status", "token", "update", "upload", "user", "users"]);
+const PROTECTED_IDENTITY_HEADERS = new Set([
+  "connection",
+  "content-length",
+  "content-type",
+  "expect",
+  "host",
+  "keep-alive",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+const REQUEST_ID_HEADERS = new Set([
+  "x-amz-request-id",
+  "x-amzn-requestid",
+  "x-correlation-id",
+  "x-request-id",
+]);
+const UUID_OR_HEX_REQUEST_ID = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[0-9a-f]{16,64})$/i;
+const TRACEPARENT = /^[\da-f]{2}-[\da-f]{32}-[\da-f]{16}-[\da-f]{2}$/i;
+const B3_SINGLE = /^[\da-f]{16,32}-[\da-f]{16}(?:-[01d])?(?:-[\da-f]{16})?$/i;
+const B3_TRACE_ID = /^[\da-f]{16}(?:[\da-f]{16})?$/i;
+const B3_SPAN_ID = /^[\da-f]{16}$/i;
 
 /**
  * Build a JSON-safe request summary without exposing header values, query
@@ -52,14 +76,56 @@ export function isUninspectableHttpRequest(summary) {
 }
 
 /** Command-local opaque cache identity. It never enters reviewer prompts. */
-export function httpRequestScopeFingerprint(request, summary, secret) {
-  const headers = [...request.headers.entries()].sort(([left], [right]) => left.localeCompare(right));
+export function httpRequestScopeFingerprint(request, summary, secret, options = {}) {
+  const ignoredHeaders = normalizeIgnoredHttpHeaders(options.ignoredHeaders);
+  const headers = [...request.headers.entries()]
+    .map(([name, value]) => {
+      const normalizedName = name.toLowerCase();
+      return [
+        normalizedName,
+        ignoredHeaders.has(normalizedName)
+          ? "[IGNORED]"
+          : normalizeVolatileHeaderValue(normalizedName, value),
+      ];
+    })
+    .sort(([left], [right]) => left.localeCompare(right));
   return createHmac("sha256", secret).update(JSON.stringify({
     method: request.method,
     url: request.url,
     headers,
     bodySha256: summary.bodySha256 ?? null,
   })).digest("hex");
+}
+
+/**
+ * Validate header names which a caller may omit from the opaque cache identity.
+ * Authentication, authority, and HTTP framing must continue to distinguish
+ * requests even when callers configure other volatile application headers.
+ */
+export function normalizeIgnoredHttpHeaders(headers = []) {
+  if (!Array.isArray(headers)) throw new Error("ignored HTTP headers must be an array");
+  const result = new Set();
+  for (const header of headers) {
+    if (typeof header !== "string" || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(header)) {
+      throw new Error("ignored HTTP header names must be valid header names");
+    }
+    const normalized = header.toLowerCase();
+    if (PROTECTED_IDENTITY_HEADERS.has(normalized) || SENSITIVE_HEADER.test(normalized) || SENSITIVE_NAME.test(normalized)) {
+      throw new Error(`ignored HTTP header is protected: ${normalized}`);
+    }
+    result.add(normalized);
+  }
+  return result;
+}
+
+function normalizeVolatileHeaderValue(name, value) {
+  if (REQUEST_ID_HEADERS.has(name) && UUID_OR_HEX_REQUEST_ID.test(value)) return "[VOLATILE_REQUEST_ID]";
+  if (name === "traceparent" && TRACEPARENT.test(value)) return "[VOLATILE_TRACE]";
+  if (name === "b3" && B3_SINGLE.test(value)) return "[VOLATILE_TRACE]";
+  if (name === "x-b3-traceid" && B3_TRACE_ID.test(value)) return "[VOLATILE_TRACE]";
+  if ((name === "x-b3-spanid" || name === "x-b3-parentspanid") && B3_SPAN_ID.test(value)) return "[VOLATILE_TRACE]";
+  if ((name === "x-b3-sampled" || name === "x-b3-flags") && /^(?:0|1)$/.test(value)) return "[VOLATILE_TRACE]";
+  return value;
 }
 
 export function requestDestinationKey(request) {

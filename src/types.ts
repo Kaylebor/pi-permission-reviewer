@@ -15,8 +15,14 @@ export interface PermissionReviewerConfig {
   /** Path to a trusted local Markdown extension for the Guardian prompt. */
   guardianPromptFile?: string;
   reviewContext?: ReviewContextConfig;
+  execution?: ExecutionConfig;
   reactiveReview?: ReactiveReviewConfig;
   boundaryReview?: BoundaryReviewConfig;
+}
+
+export interface ExecutionConfig {
+  /** Maximum number of contained sandboxes that may execute concurrently. */
+  maxConcurrentSandboxes: number;
 }
 
 export type ReactiveReasoning =
@@ -28,8 +34,12 @@ export type ReactiveReasoning =
 export interface ReactiveReviewConfig {
   reasoning: ReactiveReasoning;
   floor: ThinkingLevel;
-  /** Experimental request-level inspection for dynamically approved HTTP(S). */
+  /** Experimental request-level inspection for dynamically approved HTTPS. */
   inspection: "destination" | "http-metadata";
+  /** Escalation path when the bounded HTTP request body is incomplete. */
+  incompleteBodyApproval: "human" | "reviewer";
+  /** Lowercase request-header names excluded from request identity matching. */
+  requestIdentityIgnoredHeaders: readonly string[];
 }
 
 export interface BoundaryReviewConfig {

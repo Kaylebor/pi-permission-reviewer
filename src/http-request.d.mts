@@ -24,6 +24,8 @@ export function httpRequestScopeFingerprint(
   request: Request,
   summary: HttpRequestSummary,
   secret: Uint8Array | string,
+  options?: { ignoredHeaders?: readonly string[] },
 ): string;
+export function normalizeIgnoredHttpHeaders(headers?: readonly string[]): ReadonlySet<string>;
 export function requestDestinationKey(request: Request): string;
 export function callbackDestinationKey(host: string, port?: number): string;

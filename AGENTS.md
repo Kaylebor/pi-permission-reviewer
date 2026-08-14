@@ -110,6 +110,14 @@
 - Assert that every permission block omits Pi's `terminate` flag. Hard turn
   termination is outside this extension's permission model; escalation through
   reviewers and the human is the authority path.
+- Treat expected contention, incomplete evidence, provider unavailability, and
+  recoverable policy uncertainty as queue, escalation, human review, or a
+  continuable tool result. Reserve thrown failures for cancellation or an
+  unrecoverable runtime/invariant violation; never use them as routine flow
+  control.
+- Preserve the no-probe network invariant: the worker pauses the command's real
+  request, keeps raw request values/body bytes local, and forwards contents only
+  after approval. DNS and TLS metadata exposure is accepted.
 - Keep README security claims narrower than the implemented boundary. Update
   README, architecture notes, examples, and future-design notes together when a
   change affects user expectations.

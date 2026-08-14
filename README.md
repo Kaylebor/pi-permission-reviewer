@@ -22,8 +22,8 @@ a Linux host. Windows is not currently a supported target.
 
 | Platform | Automated checks | Live runtime status |
 | --- | --- | --- |
-| macOS | Type, unit, and package checks | Exercised |
-| Linux | Type, unit, and package checks | Provisional; live SRT validation pending |
+| macOS | Type, unit, package, and local-only SRT integration checks | Exercised |
+| Linux | Type, unit, package, and local-only SRT integration checks | Provisional pending user-host validation |
 | Windows | None | Unsupported |
 
 Tiered model review applies to agent-issued `bash` calls and to `pi-perm`
@@ -95,7 +95,7 @@ Run:
 ```
 
 The interactive menu can add and remove reviewers, change same-level fallback
-order, configure reviewer context, reactive review, and Git boundary
+order, configure reviewer context, sandbox concurrency, reactive review, and Git boundary
 compatibility, edit the additional policy or Guardian prompt, or open the
 complete JSON in Pi's editor.
 Changes are written atomically, use user-only file permissions on Unix, and take
@@ -203,6 +203,11 @@ SSH-agent path disables AF_UNIX isolation for that one invocation because SRT
 cannot filter Unix sockets by pathname there. Docker, Podman, and other local
 service sockets may then permit control beyond the remaining sandbox.
 
+`execution.maxConcurrentSandboxes` defaults to `4` and accepts `1` through
+`32`. Calls beyond the active limit wait in a cancellable FIFO instead of
+failing. Session changes, configuration reloads, shutdown, and caller
+cancellation remove queued work; increasing the limit drains the queue.
+
 Semantics:
 
 - Commands with proactive or concrete boundary requests receive a minimum
@@ -262,7 +267,9 @@ conversation API. Future constrained read-only inspection should be added as an
 explicit capability rather than exposing shell access.
 
 Reactive continuation defaults to `reactiveReview.reasoning: "one-lower"` with
-a `low` floor. Only the original reviewer that allowed the command is reduced:
+a `low` floor. The latest reviewer that successfully allowed the command or a
+reactive continuation becomes the next continuation anchor. Only that resumed
+reviewer is reduced:
 for example, `medium` becomes `low`, `xhigh` becomes `high`, and `max` becomes
 `xhigh`. A reviewer
 already configured below the floor is not raised. Same-level fallbacks and all
@@ -274,7 +281,7 @@ bounded evidence packet.
 
 `reactiveReview.inspection` defaults to `"destination"`. The opt-in
 `"http-metadata"` mode additionally enables SRT's experimental TLS termination
-and request filter for HTTP(S) requests to destinations that this extension
+and request filter for HTTPS requests to destinations that this extension
 approved reactively. Configure it through `/permission-reviewer configure` or
 JSON:
 
@@ -283,7 +290,9 @@ JSON:
   "reactiveReview": {
     "reasoning": "one-lower",
     "floor": "low",
-    "inspection": "http-metadata"
+    "inspection": "http-metadata",
+    "incompleteBodyApproval": "human",
+    "requestIdentityIgnoredHeaders": []
   }
 }
 ```
@@ -408,8 +417,11 @@ headers, bodies, credentials, or a changed DNS resolution. Reviewer and
 main-agent prompts state this explicitly so the decision is made at the actual
 available granularity. Explicit SRT deny rules remain
 authoritative and never reach the reviewer. Headless operation denies off-list
-connections. Reviews are serialized, limited to eight distinct destinations per
-command, and cancelled after 30 seconds or when the command ends. Reactive
+connections. Reviews are serialized and cancelled after 30 seconds or when the
+command ends. Completed destination decisions use an eight-entry LRU cache;
+evicted destinations are reviewed again rather than stopping the command. A
+fixed 64-review in-flight safety ceiling rejects only pathological concurrent
+request floods with a continuable per-request denial. Reactive
 approval is currently limited to public-looking HTTPS destinations on port 443;
 loopback, local/private literal addresses, metadata
 hosts, and other ports fail closed. DNS rebinding cannot be ruled out from
@@ -423,13 +435,19 @@ content type/declared size, and bounded body characteristics.
 Header values, query values, and raw body bytes never leave the worker. Body
 inspection is capped at 64 KiB and 1.5 seconds; complete bodies contribute a
 SHA-256 digest and heuristic risk flags, while incomplete inspection is marked
-and never cached. Cache identity is an opaque command-local HMAC over exact URL,
-headers, and a complete body digest; it is used only by the transport and is
-not sent to the reviewer. Repeated identical requests can reuse a decision,
-while different values or request shapes require another review. Reviews remain
-serialized and are limited to 16 distinct request identities per command.
-Declared bodies on GET, HEAD, or OPTIONS are denied because SRT cannot expose
-those bytes to its Fetch-compatible request filter; use POST or PUT instead.
+and never cached. This includes declared GET, HEAD, or OPTIONS bodies, whose
+bytes SRT cannot expose through its Fetch-compatible callback. By default the
+reviewer supplies advice but only a human can approve the unseen bytes once;
+set `incompleteBodyApproval` to `"reviewer"` to let the configured ladder decide.
+
+Cache identity is an opaque command-local HMAC over the exact URL, protected
+headers, and a complete body digest; it is used only by the transport and is not
+sent to the reviewer. Strictly formatted trace/request identifiers are
+normalized. `requestIdentityIgnoredHeaders` can explicitly exclude up to 32
+additional non-sensitive headers, but rejects credentials, authority, and HTTP
+framing fields. Completed request decisions use a 16-entry LRU cache; an evicted
+shape is reviewed again. Different protected values or request shapes still
+require another review.
 
 This mode is experimental because it relies on SRT TLS termination. It can
 break certificate-pinned or mutual-TLS clients and rejects configurations with
@@ -440,8 +458,8 @@ resolution are not inspected; the preceding host-port approval is still a
 meaningful channel grant, so request metadata is additional evidence rather
 than DLP or a complete egress boundary.
 
-The Pi bash `timeout` counts active sandboxed execution and pauses while a
-network permission decision is pending. Timeouts implemented by the command
+The Pi bash `timeout` counts active sandboxed execution and pauses during HTTP
+body inspection as well as network or request permission review. Timeouts implemented by the command
 itself do not pause: for example, `curl --max-time 10` can expire while a model
 or human reviews a redirect destination. Agents are prompted to omit short
 application-level wall-clock deadlines or leave enough review headroom when a
@@ -456,6 +474,9 @@ The reactive network bridge covers only public-looking HTTPS destinations and
 is reviewer-assisted egress control, not DLP. Optional HTTP metadata inspection
 improves request-level evidence for traffic SRT can parse, but does not remove
 the destination-level limitations above.
+SRT pauses the command's actual request; this extension does not issue a safety
+probe or duplicate request. DNS resolution and TLS setup may occur first, but
+HTTP request contents are forwarded upstream only after approval.
 Filesystem and Unix-socket access is preflight-only through the explicit Bash
 request above; there is no post-failure discovery or automatic replay. A curated
 and user-expandable catalogue of common host-port combinations is intentionally

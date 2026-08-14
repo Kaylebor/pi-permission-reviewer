@@ -6,10 +6,15 @@
     "toolTokens": 2000,
     "persistence": "command"
   },
+  "execution": {
+    "maxConcurrentSandboxes": 4
+  },
   "reactiveReview": {
     "reasoning": "one-lower",
     "floor": "low",
-    "inspection": "destination"
+    "inspection": "destination",
+    "incompleteBodyApproval": "human",
+    "requestIdentityIgnoredHeaders": []
   },
   "boundaryReview": {
     "publicKeyRead": "review",

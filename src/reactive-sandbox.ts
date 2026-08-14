@@ -10,8 +10,12 @@ export interface NetworkRequest {
   port?: number;
 }
 
+// This protects the worker and review queue from an unbounded burst without
+// making ordinary, long-running invocations accumulate a lifetime limit.
+const MAX_IN_FLIGHT_REVIEWS = 64;
+
 interface WorkerMessage {
-  type: "started" | "output" | "network-request" | "http-request" | "result" | "error";
+  type: "started" | "output" | "network-request" | "http-request" | "http-policy-denial" | "result" | "error";
   toolCallId?: string;
   requestId?: string;
   host?: string;
@@ -52,6 +56,8 @@ export async function runReactiveSandbox(options: {
     signal: AbortSignal,
   ): Promise<NetworkDecision>;
   onHttpDecision?(decision: NetworkDecision, request: HttpRequestSummary): void;
+  /** Sanitized deterministic request-filter failure with no reviewable summary. */
+  onHttpPolicyDenial?(reason: string): void;
   /** Stable ReviewCase id when available; toolCallId remains a safe fallback. */
   caseId?: string;
   signal?: AbortSignal;
@@ -62,11 +68,14 @@ export async function runReactiveSandbox(options: {
   networkRequestLimit?: number;
   networkReviewTimeoutMs?: number;
   httpRequestLimit?: number;
+  /** Volatile, non-sensitive headers omitted from the HTTP cache identity. */
+  httpIgnoredHeaders?: readonly string[];
 }): Promise<{ exitCode: number | null }> {
   if (options.signal?.aborted) throw new Error("aborted");
   const settings = immutableSettings(options.settings);
   const environment = immutableWorkerEnvironment(options.environment);
   const timeoutMs = requestedTimeoutMs(options.timeout);
+  const httpIgnoredHeaders = options.httpIgnoredHeaders ?? [];
   const worker = spawn(
     options.nodeBinary ?? process.env.PI_PERMISSION_REVIEWER_NODE ?? "node",
     [options.workerPath ?? fileURLToPath(new URL("./sandbox-worker.mjs", import.meta.url))],
@@ -78,9 +87,12 @@ export async function runReactiveSandbox(options: {
       windowsHide: true,
     },
   );
-  const decisions = new Map<string, Promise<NetworkDecision>>();
-  const httpDecisions = new Map<string, Promise<NetworkDecision>>();
+  const networkDecisions = new Map<string, NetworkDecision>();
+  const httpDecisions = new Map<string, NetworkDecision>();
+  const inFlightNetworkDecisions = new Map<string, Promise<NetworkDecision>>();
+  const inFlightHttpDecisions = new Map<string, Promise<NetworkDecision>>();
   let decisionQueue = Promise.resolve();
+  let inFlightReviews = 0;
   const invocationNonce = randomUUID();
   const reviewLifecycle = new AbortController();
   const caseId = options.caseId ?? options.toolCallId;
@@ -187,20 +199,24 @@ export async function runReactiveSandbox(options: {
           return;
         }
         const key = `${canonical.host}:${canonical.port ?? "*"}`;
-        let decision = decisions.get(key);
+        const cachedDecision = getLru(networkDecisions, key);
+        let decision = cachedDecision && Promise.resolve(cachedDecision);
         if (!decision) {
-          if (decisions.size >= (options.networkRequestLimit ?? 8)) {
+          decision = inFlightNetworkDecisions.get(key);
+          if (!decision && inFlightReviews >= MAX_IN_FLIGHT_REVIEWS) {
             respondToNetworkRequest(
               message.requestId,
               denyNetworkDecision(
                 caseId,
                 "limit",
-                "network destination review limit reached",
+                "network review safety limit reached",
               ),
               canonical,
             );
             return;
-          } else {
+          }
+          if (!decision) {
+            inFlightReviews += 1;
             const reviewController = new AbortController();
             const reviewSignal = AbortSignal.any([
               reviewLifecycle.signal,
@@ -292,8 +308,18 @@ export async function runReactiveSandbox(options: {
               () => undefined,
               () => undefined,
             );
+            inFlightNetworkDecisions.set(key, decision);
+            void decision.then((resolved) => {
+              inFlightNetworkDecisions.delete(key);
+              inFlightReviews -= 1;
+              if (cacheableNetworkDecision(resolved)) {
+                setLru(networkDecisions, key, resolved, options.networkRequestLimit ?? 8);
+              }
+            }, () => {
+              inFlightNetworkDecisions.delete(key);
+              inFlightReviews -= 1;
+            });
           }
-          decisions.set(key, decision);
         }
         void decision
           .then((resolved) => {
@@ -343,16 +369,21 @@ export async function runReactiveSandbox(options: {
         const key = summary.bodyPresent && summary.bodyComplete !== true
           ? `uncacheable:${requestId}`
           : message.scopeFingerprint!;
-        let decision = httpDecisions.get(key);
+        const cacheable = !(summary.bodyPresent && summary.bodyComplete !== true);
+        const cachedDecision = cacheable ? getLru(httpDecisions, key) : undefined;
+        let decision = cachedDecision && Promise.resolve(cachedDecision);
         if (!decision) {
-          if (httpDecisions.size >= (options.httpRequestLimit ?? 16)) {
+          decision = cacheable ? inFlightHttpDecisions.get(key) : undefined;
+          if (!decision && inFlightReviews >= MAX_IN_FLIGHT_REVIEWS) {
             respondToHttpRequest(
               requestId,
-              denyNetworkDecision(caseId, "limit", "HTTP request review limit reached"),
+              denyNetworkDecision(caseId, "limit", "HTTP request review safety limit reached"),
               summary,
             );
             return;
           }
+          if (!decision) {
+            inFlightReviews += 1;
           const reviewController = new AbortController();
           const reviewSignal = AbortSignal.any([reviewLifecycle.signal, reviewController.signal]);
           decision = decisionQueue.then(async () => {
@@ -403,7 +434,18 @@ export async function runReactiveSandbox(options: {
             return resolved;
           });
           decisionQueue = decision.then(() => undefined, () => undefined);
-          httpDecisions.set(key, decision);
+            if (cacheable) inFlightHttpDecisions.set(key, decision);
+            void decision.then((resolved) => {
+              if (cacheable) inFlightHttpDecisions.delete(key);
+              inFlightReviews -= 1;
+              if (cacheable && cacheableNetworkDecision(resolved)) {
+                setLru(httpDecisions, key, resolved, options.httpRequestLimit ?? 16);
+              }
+            }, () => {
+              if (cacheable) inFlightHttpDecisions.delete(key);
+              inFlightReviews -= 1;
+            });
+          }
         }
         void decision.then((resolved) => {
           if (!settled && !reviewLifecycle.signal.aborted) {
@@ -424,6 +466,17 @@ export async function runReactiveSandbox(options: {
             });
           }
         });
+        return;
+      }
+      if (message.type === "http-policy-denial") {
+        if (
+          message.toolCallId === options.toolCallId &&
+          typeof message.error === "string" &&
+          message.error.length > 0 &&
+          message.error.length <= 256
+        ) {
+          options.onHttpPolicyDenial?.(message.error);
+        }
         return;
       }
       if (message.type === "result") {
@@ -469,6 +522,7 @@ export async function runReactiveSandbox(options: {
       cwd: options.cwd,
       settings,
       ...(options.httpInspection ? { httpInspection: true } : {}),
+      ...(httpIgnoredHeaders.length > 0 ? { httpIgnoredHeaders } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     });
   });
@@ -485,6 +539,21 @@ function abortedOutcome<K extends string>(
     }
     signal.addEventListener("abort", () => resolve({ kind }), { once: true });
   });
+}
+
+function getLru<T>(cache: Map<string, T>, key: string): T | undefined {
+  const value = cache.get(key);
+  if (value === undefined) return;
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+function setLru<T>(cache: Map<string, T>, key: string, value: T, limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit <= 0) return;
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > limit) cache.delete(cache.keys().next().value!);
 }
 
 function requestedTimeoutMs(timeout: number | undefined): number | undefined {
@@ -552,6 +621,15 @@ function isNetworkDecision(value: unknown): value is NetworkDecision {
       value.source === "limit") &&
     typeof value.reason === "string" &&
     typeof value.caseId === "string"
+  );
+}
+
+function cacheableNetworkDecision(decision: NetworkDecision): boolean {
+  return (
+    decision.source === "eligibility" ||
+    decision.source === "policy" ||
+    decision.source === "reviewer" ||
+    decision.source === "human"
   );
 }
 

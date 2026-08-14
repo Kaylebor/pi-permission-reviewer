@@ -32,6 +32,11 @@ test("accepts tied and sparse reviewer levels", () => {
     reasoning: "one-lower",
     floor: "low",
     inspection: "destination",
+    incompleteBodyApproval: "human",
+    requestIdentityIgnoredHeaders: [],
+  });
+  assert.deepEqual(config.execution, {
+    maxConcurrentSandboxes: 4,
   });
   assert.deepEqual(config.boundaryReview, {
     publicKeyRead: "review",
@@ -90,6 +95,8 @@ test("validates reactive continuation reasoning", () => {
     reasoning: "inherit",
     floor: "minimal",
     inspection: "destination",
+    incompleteBodyApproval: "human",
+    requestIdentityIgnoredHeaders: [],
   });
   assert.throws(
     () => validateConfig({ reviewers: [], reactiveReview: { reasoning: "cheapest" } }),
@@ -102,6 +109,56 @@ test("validates reactive continuation reasoning", () => {
   assert.throws(
     () => validateConfig({ reviewers: [], reactiveReview: { inspection: "raw" } }),
     /reactiveReview\.inspection must be destination or http-metadata/,
+  );
+});
+
+test("validates execution concurrency and reactive request identity controls", () => {
+  const config = validateConfig({
+    reviewers: [],
+    execution: { maxConcurrentSandboxes: 32 },
+    reactiveReview: {
+      incompleteBodyApproval: "reviewer",
+      requestIdentityIgnoredHeaders: ["x-request-id", "x-trace-id", "x-request-id"],
+    },
+  });
+  assert.deepEqual(config.execution, { maxConcurrentSandboxes: 32 });
+  assert.equal(config.reactiveReview?.incompleteBodyApproval, "reviewer");
+  assert.deepEqual(config.reactiveReview?.requestIdentityIgnoredHeaders, ["x-request-id", "x-trace-id"]);
+  assert.throws(
+    () => validateConfig({ reviewers: [], execution: { maxConcurrentSandboxes: 0 } }),
+    /execution\.maxConcurrentSandboxes must be an integer from 1 to 32/,
+  );
+  assert.throws(
+    () => validateConfig({ reviewers: [], execution: { maxConcurrentSandboxes: 33 } }),
+    /execution\.maxConcurrentSandboxes must be an integer from 1 to 32/,
+  );
+  assert.throws(
+    () => validateConfig({ reviewers: [], reactiveReview: { incompleteBodyApproval: "automatic" } }),
+    /reactiveReview\.incompleteBodyApproval must be human or reviewer/,
+  );
+  for (const headers of [
+    ["X-Request-Id"],
+    ["authorization"],
+    ["x-amz-security-token"],
+    ["cookie"],
+    ["host"],
+    ["content-length"],
+    ["content-type"],
+    ["x-signature"],
+    ["x-session-id"],
+    ["x-auth"],
+  ]) {
+    assert.throws(
+      () => validateConfig({ reviewers: [], reactiveReview: { requestIdentityIgnoredHeaders: headers } }),
+      /reactiveReview\.requestIdentityIgnoredHeaders/,
+    );
+  }
+  assert.throws(
+    () => validateConfig({
+      reviewers: [],
+      reactiveReview: { requestIdentityIgnoredHeaders: Array.from({ length: 33 }, (_, index) => `x-test-${index}`) },
+    }),
+    /at most 32 headers/,
   );
 });
 

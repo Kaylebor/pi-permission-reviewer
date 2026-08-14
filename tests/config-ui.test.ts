@@ -133,8 +133,10 @@ test("configure UI exposes resumed-winner reasoning reduction", async () => {
     "Configure reactive review",
     "one-lower — reduce one step, then use the configured floor",
     "low",
-    "http-metadata — experimentally review sanitized HTTP(S) request metadata",
+    "http-metadata — experimentally review sanitized HTTPS request metadata",
+    "reviewer — let the reviewer chain decide from bounded metadata",
   ];
+  const inputs = ["x-request-id, x-trace-id"];
   try {
     await handleConfigCommand(
       "configure",
@@ -144,7 +146,7 @@ test("configure UI exposes resumed-winner reasoning reduction", async () => {
         modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false },
         ui: {
           select: async () => selections.shift(),
-          input: async () => undefined,
+          input: async () => inputs.shift(),
           editor: async () => undefined,
           confirm: async () => false,
           notify() {},
@@ -159,7 +161,55 @@ test("configure UI exposes resumed-winner reasoning reduction", async () => {
       reasoning: "one-lower",
       floor: "low",
       inspection: "http-metadata",
+      incompleteBodyApproval: "reviewer",
+      requestIdentityIgnoredHeaders: ["x-request-id", "x-trace-id"],
     });
+  } finally {
+    if (previous === undefined) delete process.env.PI_PERMISSION_REVIEWER_CONFIG;
+    else process.env.PI_PERMISSION_REVIEWER_CONFIG = previous;
+  }
+});
+
+test("configure UI exposes execution concurrency and reactive status controls", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-ui-"));
+  const path = join(directory, "config.json");
+  const previous = process.env.PI_PERMISSION_REVIEWER_CONFIG;
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = path;
+  let loaded = loadConfig(path);
+  const notices: string[] = [];
+  try {
+    await handleConfigCommand(
+      "configure",
+      {
+        hasUI: true,
+        scopedModels: [],
+        modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false },
+        ui: {
+          select: async () => "Configure execution",
+          input: async () => "8",
+          editor: async () => undefined,
+          confirm: async () => false,
+          notify(message: string) { notices.push(message); },
+        },
+      } as any,
+      {
+        getLoaded: () => loaded,
+        setLoaded: (next) => { loaded = next; },
+      },
+    );
+    assert.deepEqual(loaded.config.execution, { maxConcurrentSandboxes: 8 });
+    await handleConfigCommand(
+      "status",
+      {
+        hasUI: true,
+        scopedModels: [],
+        modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false },
+        ui: { notify(message: string) { notices.push(message); } },
+      } as any,
+      { getLoaded: () => loaded, setLoaded() {} },
+    );
+    assert.match(notices.at(-1) ?? "", /Execution: up to 8 concurrent sandboxes/);
+    assert.match(notices.at(-1) ?? "", /incomplete bodies human, identity ignores none/);
   } finally {
     if (previous === undefined) delete process.env.PI_PERMISSION_REVIEWER_CONFIG;
     else process.env.PI_PERMISSION_REVIEWER_CONFIG = previous;

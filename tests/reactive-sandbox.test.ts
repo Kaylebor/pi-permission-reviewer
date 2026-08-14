@@ -312,14 +312,14 @@ test("command settlement aborts an in-flight network review", async () => {
   assert.deepEqual(decisions, []);
 });
 
-test("network reviews are serialized and capped per invocation", async () => {
+test("network reviews are serialized and completed LRU eviction re-reviews destinations", async () => {
   let active = 0;
   let maximumActive = 0;
   let reviews = 0;
   const decisions: Array<{ decision: NetworkDecision; destination: { host: string; port?: number } }> = [];
   await runReactiveSandbox({
     toolCallId: "reactive-many",
-    command: "many",
+    command: "lru",
     cwd: process.cwd(),
     settings: {},
     workerPath,
@@ -335,18 +335,111 @@ test("network reviews are serialized and capped per invocation", async () => {
     },
     onNetworkDecision: (decision, destination) => decisions.push({ decision, destination }),
   });
-  assert.equal(reviews, 2);
+  assert.equal(reviews, 4);
   assert.equal(maximumActive, 1);
-  assert.deepEqual(
-    decisions.find(({ destination }) => destination.host === "three.example"),
-    {
-      decision: {
-        decision: "deny",
-        source: "limit",
-        reason: "network destination review limit reached",
-        caseId: "reactive-many",
-      },
-      destination: { host: "three.example", port: 443 },
+  assert.equal(decisions.filter(({ destination }) => destination.host === "one.example").length, 2);
+  assert.ok(decisions.every(({ decision }) => decision.decision === "allow"));
+});
+
+test("transient review failures are not retained in the completed cache", async () => {
+  let reviews = 0;
+  const result = await runReactiveSandbox({
+    toolCallId: "reactive-transient",
+    command: "transient",
+    cwd: process.cwd(),
+    settings: {},
+    workerPath,
+    onData() {},
+    onNetworkRequest: async () => {
+      reviews += 1;
+      return networkDecision("deny", reviews === 1 ? "error" : "reviewer", "reactive-transient");
     },
-  );
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(reviews, 2);
+});
+
+test("valid incomplete HTTP summaries are reviewed each time and never cached", async () => {
+  const summaries: Array<{ bodyComplete?: boolean }> = [];
+  const result = await runReactiveSandbox({
+    toolCallId: "reactive-http-incomplete",
+    command: "http-incomplete",
+    cwd: process.cwd(),
+    settings: {},
+    workerPath,
+    httpInspection: true,
+    onData() {},
+    onNetworkRequest: async () => networkDecision("allow", "reviewer", "reactive-http-incomplete"),
+    onHttpRequest: async (summary) => {
+      summaries.push(summary);
+      return networkDecision("allow", "human", "reactive-http-incomplete");
+    },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(summaries.length, 2);
+  assert.ok(summaries.every((summary) => summary.bodyComplete === false));
+});
+
+test("completed HTTP LRU eviction re-reviews an evicted request identity", async () => {
+  let reviews = 0;
+  const result = await runReactiveSandbox({
+    toolCallId: "reactive-http-lru",
+    command: "http-lru",
+    cwd: process.cwd(),
+    settings: {},
+    workerPath,
+    httpInspection: true,
+    httpRequestLimit: 2,
+    onData() {},
+    onNetworkRequest: async () => networkDecision("allow", "reviewer", "reactive-http-lru"),
+    onHttpRequest: async () => {
+      reviews += 1;
+      return networkDecision("allow", "reviewer", "reactive-http-lru");
+    },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(reviews, 4);
+});
+
+test("malformed HTTP summaries receive a continuable sanitized denial", async () => {
+  const decisions: NetworkDecision[] = [];
+  const result = await runReactiveSandbox({
+    toolCallId: "reactive-http-invalid",
+    command: "http-invalid",
+    cwd: process.cwd(),
+    settings: {},
+    workerPath,
+    httpInspection: true,
+    onData() {},
+    onNetworkRequest: async () => networkDecision("allow", "reviewer", "reactive-http-invalid"),
+    onHttpRequest: async () => {
+      assert.fail("malformed summaries must not reach parent review");
+    },
+    onHttpDecision: (decision) => decisions.push(decision),
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(decisions, [{
+    decision: "deny",
+    source: "error",
+    reason: "invalid HTTP request review: invalid metadata",
+    caseId: "reactive-http-invalid",
+  }]);
+});
+
+test("deterministic HTTP inspection failures surface a sanitized diagnostic", async () => {
+  const diagnostics: string[] = [];
+  const result = await runReactiveSandbox({
+    toolCallId: "reactive-http-policy",
+    command: "http-policy",
+    cwd: process.cwd(),
+    settings: {},
+    workerPath,
+    httpInspection: true,
+    onData() {},
+    onNetworkRequest: async () => networkDecision("allow", "reviewer", "reactive-http-policy"),
+    onHttpRequest: async () => assert.fail("no reviewable summary exists"),
+    onHttpPolicyDenial: (reason) => diagnostics.push(reason),
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(diagnostics, ["HTTP request metadata inspection failed"]);
 });

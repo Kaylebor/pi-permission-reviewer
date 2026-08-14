@@ -62,6 +62,7 @@
   },
   "scripts": {
     "test": "node --import tsx --test tests/*.test.*",
+    "test:integration:srt": "node --test tests/integration/request-filter-harness.integration.test.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "check": "npm run typecheck && npm test",
     "package:check": "npm pack --dry-run",

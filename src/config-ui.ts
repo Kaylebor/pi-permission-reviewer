@@ -36,6 +36,7 @@ const ACTIONS = [
   "Remove a reviewer",
   "Move a tied reviewer",
   "Configure review context",
+  "Configure execution",
   "Configure reactive review",
   "Configure boundary review",
   "Edit policy",
@@ -85,6 +86,7 @@ export async function handleConfigCommand(
   if (action === "Remove a reviewer") return removeReviewer(ctx, options);
   if (action === "Move a tied reviewer") return moveReviewer(ctx, options);
   if (action === "Configure review context") return configureReviewContext(ctx, options);
+  if (action === "Configure execution") return configureExecution(ctx, options);
   if (action === "Configure reactive review") return configureReactiveReview(ctx, options);
   if (action === "Configure boundary review") return configureBoundaryReview(ctx, options);
   if (action === "Edit policy") return editPolicy(ctx, options);
@@ -134,7 +136,11 @@ function showStatus(
     reasoning: "one-lower",
     floor: "low",
     inspection: "destination",
+    incompleteBodyApproval: "human",
+    requestIdentityIgnoredHeaders: [],
   };
+  const ignoredRequestIdentityHeaders = reactiveReview.requestIdentityIgnoredHeaders;
+  const execution = loaded.config.execution ?? { maxConcurrentSandboxes: 4 };
   const boundaryReview = loaded.config.boundaryReview ?? {
     publicKeyRead: "review",
     gitFsmonitor: true,
@@ -148,7 +154,8 @@ function showStatus(
       `Policy: ${loaded.config.policy ?? "default reviewer policy"}`,
       `Guardian prompt: ${loaded.guardianPromptSource ?? "built-in"}`,
       `Context: ${reviewContext.mode}, ${reviewContext.conversationTokens} conversation tokens + ${reviewContext.toolTokens} tool tokens, ${reviewContext.persistence} persistence`,
-      `Reactive review: ${reactiveReview.reasoning}${reactiveReview.reasoning === "one-lower" ? ` (floor ${reactiveReview.floor})` : ""}, ${reactiveReview.inspection}`,
+      `Execution: up to ${execution.maxConcurrentSandboxes} concurrent sandboxes`,
+      `Reactive review: ${reactiveReview.reasoning}${reactiveReview.reasoning === "one-lower" ? ` (floor ${reactiveReview.floor})` : ""}, ${reactiveReview.inspection}, incomplete bodies ${reactiveReview.incompleteBodyApproval}, identity ignores ${ignoredRequestIdentityHeaders.length > 0 ? ignoredRequestIdentityHeaders.join(", ") : "none"}`,
       `Boundary review: public-key reads ${boundaryReview.publicKeyRead}, Git fsmonitor ${boundaryReview.gitFsmonitor ? "enabled" : "disabled"}, Git SSH agent ${boundaryReview.gitSshAgent}`,
       ...runtimeStatus,
     ].join("\n"),
@@ -158,6 +165,22 @@ function showStatus(
         ? "warning"
         : "info",
   );
+}
+
+async function configureExecution(
+  ctx: ConfigContext,
+  options: ConfigCommandOptions,
+): Promise<void> {
+  const loaded = options.getLoaded();
+  const maxConcurrentSandboxes = await ctx.ui.input(
+    "Maximum concurrent sandboxes",
+    String(loaded.config.execution?.maxConcurrentSandboxes ?? 4),
+  );
+  if (maxConcurrentSandboxes === undefined) return;
+  persist(ctx, options, {
+    ...loaded.config,
+    execution: { maxConcurrentSandboxes: Number(maxConcurrentSandboxes) },
+  });
 }
 
 async function configureBoundaryReview(
@@ -228,15 +251,30 @@ async function configureReactiveReview(
   }
   const inspection = await ctx.ui.select("Reactive network inspection", [
     "destination — review only the requested host and port",
-    "http-metadata — experimentally review sanitized HTTP(S) request metadata",
+    "http-metadata — experimentally review sanitized HTTPS request metadata",
   ]);
   if (!inspection) return;
+  const incompleteBodyApproval = await ctx.ui.select("Incomplete HTTP request body", [
+    "human — require human approval when body inspection is incomplete",
+    "reviewer — let the reviewer chain decide from bounded metadata",
+  ]);
+  if (!incompleteBodyApproval) return;
+  const ignoredHeaders = await ctx.ui.input(
+    "Request identity headers to ignore",
+    (loaded.config.reactiveReview?.requestIdentityIgnoredHeaders ?? []).join(", "),
+  );
+  if (ignoredHeaders === undefined) return;
   persist(ctx, options, {
     ...loaded.config,
     reactiveReview: {
       reasoning: reasoning.split(" ", 1)[0] as NonNullable<PermissionReviewerConfig["reactiveReview"]>["reasoning"],
       floor,
       inspection: inspection.startsWith("http-metadata") ? "http-metadata" : "destination",
+      incompleteBodyApproval: incompleteBodyApproval.startsWith("reviewer") ? "reviewer" : "human",
+      requestIdentityIgnoredHeaders: ignoredHeaders
+        .split(",")
+        .map((header) => header.trim())
+        .filter(Boolean),
     },
   });
 }

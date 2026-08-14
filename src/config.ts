@@ -15,6 +15,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { TextDecoder } from "node:util";
+import { normalizeIgnoredHttpHeaders } from "./http-request.mjs";
 import type {
   PermissionReviewerConfig,
   ReviewerConfig,
@@ -26,10 +27,15 @@ export const DEFAULT_REVIEW_CONTEXT = {
   toolTokens: 2_000,
   persistence: "command",
 } as const;
+export const DEFAULT_EXECUTION = {
+  maxConcurrentSandboxes: 4,
+} as const;
 export const DEFAULT_REACTIVE_REVIEW = {
   reasoning: "one-lower",
   floor: "low",
   inspection: "destination",
+  incompleteBodyApproval: "human",
+  requestIdentityIgnoredHeaders: [],
 } as const;
 export const DEFAULT_BOUNDARY_REVIEW = {
   publicKeyRead: "review",
@@ -39,6 +45,7 @@ export const DEFAULT_BOUNDARY_REVIEW = {
 const DEFAULT_CONFIG: PermissionReviewerConfig = {
   reviewers: [],
   reviewContext: DEFAULT_REVIEW_CONTEXT,
+  execution: DEFAULT_EXECUTION,
   reactiveReview: DEFAULT_REACTIVE_REVIEW,
   boundaryReview: DEFAULT_BOUNDARY_REVIEW,
 };
@@ -114,17 +121,33 @@ export function validateConfig(value: unknown): PermissionReviewerConfig {
     throw new Error("policy must be a string");
   }
   const reviewContext = validateReviewContext(value.reviewContext);
+  const execution = validateExecution(value.execution);
   const reactiveReview = validateReactiveReview(value.reactiveReview);
   const boundaryReview = validateBoundaryReview(value.boundaryReview);
   const guardianPromptFile = validateGuardianPromptFile(value.guardianPromptFile);
   return {
     reviewers,
     reviewContext,
+    execution,
     reactiveReview,
     boundaryReview,
     ...(value.policy ? { policy: value.policy } : {}),
     ...(guardianPromptFile ? { guardianPromptFile } : {}),
   };
+}
+
+function validateExecution(value: unknown): NonNullable<PermissionReviewerConfig["execution"]> {
+  if (value === undefined) return { ...DEFAULT_EXECUTION };
+  if (!isRecord(value)) throw new Error("execution must be an object");
+  const maxConcurrentSandboxes = value.maxConcurrentSandboxes ?? DEFAULT_EXECUTION.maxConcurrentSandboxes;
+  if (
+    !Number.isSafeInteger(maxConcurrentSandboxes) ||
+    Number(maxConcurrentSandboxes) < 1 ||
+    Number(maxConcurrentSandboxes) > 32
+  ) {
+    throw new Error("execution.maxConcurrentSandboxes must be an integer from 1 to 32");
+  }
+  return { maxConcurrentSandboxes: Number(maxConcurrentSandboxes) };
 }
 
 function validateBoundaryReview(value: unknown): NonNullable<PermissionReviewerConfig["boundaryReview"]> {
@@ -151,6 +174,10 @@ function validateReactiveReview(value: unknown): NonNullable<PermissionReviewerC
   const reasoning = value.reasoning ?? DEFAULT_REACTIVE_REVIEW.reasoning;
   const floor = value.floor ?? DEFAULT_REACTIVE_REVIEW.floor;
   const inspection = value.inspection ?? DEFAULT_REACTIVE_REVIEW.inspection;
+  const incompleteBodyApproval = value.incompleteBodyApproval ?? DEFAULT_REACTIVE_REVIEW.incompleteBodyApproval;
+  const requestIdentityIgnoredHeaders = validateRequestIdentityIgnoredHeaders(
+    value.requestIdentityIgnoredHeaders,
+  );
   const validReasoning = [
     "inherit",
     "one-lower",
@@ -172,11 +199,42 @@ function validateReactiveReview(value: unknown): NonNullable<PermissionReviewerC
   if (inspection !== "destination" && inspection !== "http-metadata") {
     throw new Error("reactiveReview.inspection must be destination or http-metadata");
   }
+  if (incompleteBodyApproval !== "human" && incompleteBodyApproval !== "reviewer") {
+    throw new Error("reactiveReview.incompleteBodyApproval must be human or reviewer");
+  }
   return {
     reasoning: reasoning as NonNullable<PermissionReviewerConfig["reactiveReview"]>["reasoning"],
     floor: floor as NonNullable<PermissionReviewerConfig["reactiveReview"]>["floor"],
     inspection,
+    incompleteBodyApproval,
+    requestIdentityIgnoredHeaders,
   };
+}
+
+const HTTP_TOKEN = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/;
+
+function validateRequestIdentityIgnoredHeaders(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("reactiveReview.requestIdentityIgnoredHeaders must be an array");
+  }
+  const headers = new Set<string>();
+  for (const header of value) {
+    if (typeof header !== "string" || !HTTP_TOKEN.test(header)) {
+      throw new Error("reactiveReview.requestIdentityIgnoredHeaders must contain lowercase HTTP tokens");
+    }
+    headers.add(header);
+  }
+  if (headers.size > 32) {
+    throw new Error("reactiveReview.requestIdentityIgnoredHeaders must contain at most 32 headers");
+  }
+  try {
+    normalizeIgnoredHttpHeaders([...headers]);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "invalid protected header";
+    throw new Error(`reactiveReview.requestIdentityIgnoredHeaders: ${reason}`);
+  }
+  return [...headers];
 }
 
 function validateReviewContext(value: unknown): NonNullable<PermissionReviewerConfig["reviewContext"]> {

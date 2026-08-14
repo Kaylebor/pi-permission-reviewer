@@ -18,5 +18,15 @@
       "reasoning": "medium",
       "timeoutMs": 60000
     }
-  ]
+  ],
+  "execution": {
+    "maxConcurrentSandboxes": 4
+  },
+  "reactiveReview": {
+    "reasoning": "one-lower",
+    "floor": "low",
+    "inspection": "destination",
+    "incompleteBodyApproval": "human",
+    "requestIdentityIgnoredHeaders": []
+  }
 }

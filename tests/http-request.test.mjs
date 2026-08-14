@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   httpRequestScopeFingerprint,
   isUninspectableHttpRequest,
+  normalizeIgnoredHttpHeaders,
   summarizeHttpRequest,
 } from "../src/http-request.mjs";
 
@@ -35,7 +36,7 @@ test("HTTP summaries redact values and expose only bounded request characteristi
   assert.ok(summary.bodyRiskFlags.includes("secret-field-shape"));
 });
 
-test("declared GET bodies are marked uninspectable for deterministic denial", async () => {
+test("declared GET bodies are marked uninspectable for parent review", async () => {
   const summary = await summarizeHttpRequest({
     method: "GET",
     url: "https://example.com/probe",
@@ -91,4 +92,54 @@ test("HTTP body inspection is bounded and reports an incomplete body", async () 
   assert.equal(summary.bodyObservedBytes, 17);
   assert.equal(summary.bodySha256, undefined);
   assert.ok(summary.bodyRiskFlags.includes("body-over-limit"));
+});
+
+test("valid request IDs and trace headers normalize only in the opaque cache identity", async () => {
+  const firstRequest = new Request("https://example.com/resource", {
+    headers: {
+      "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      "x-request-id": "9b7c5ca5-6d93-4b23-a6fc-7e6758303b67",
+    },
+  });
+  const secondRequest = new Request("https://example.com/resource", {
+    headers: {
+      "traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+      "x-request-id": "6d9488c0-438d-49c4-90b8-6da5b6f1b1ef",
+    },
+  });
+  const malformedRequest = new Request("https://example.com/resource", {
+    headers: { "x-request-id": "not-a-valid-request-id" },
+  });
+  const otherMalformedRequest = new Request("https://example.com/resource", {
+    headers: { "x-request-id": "a-different-invalid-value" },
+  });
+  const secret = Buffer.alloc(32, 5);
+  assert.equal(
+    httpRequestScopeFingerprint(firstRequest, await summarizeHttpRequest(firstRequest), secret),
+    httpRequestScopeFingerprint(secondRequest, await summarizeHttpRequest(secondRequest), secret),
+  );
+  assert.notEqual(
+    httpRequestScopeFingerprint(malformedRequest, await summarizeHttpRequest(malformedRequest), secret),
+    httpRequestScopeFingerprint(otherMalformedRequest, await summarizeHttpRequest(otherMalformedRequest), secret),
+  );
+});
+
+test("configured ignored headers never remove credentials, authority, or framing from identity", async () => {
+  const firstRequest = new Request("https://example.com/resource", {
+    headers: { "x-deployment-id": "first", authorization: "Bearer one" },
+  });
+  const secondRequest = new Request("https://example.com/resource", {
+    headers: { "x-deployment-id": "second", authorization: "Bearer one" },
+  });
+  const secret = Buffer.alloc(32, 9);
+  const first = await summarizeHttpRequest(firstRequest);
+  const second = await summarizeHttpRequest(secondRequest);
+  assert.equal(
+    httpRequestScopeFingerprint(firstRequest, first, secret, { ignoredHeaders: ["x-deployment-id"] }),
+    httpRequestScopeFingerprint(secondRequest, second, secret, { ignoredHeaders: ["x-deployment-id"] }),
+  );
+  assert.throws(() => normalizeIgnoredHttpHeaders(["authorization"]), /protected/);
+  assert.throws(() => normalizeIgnoredHttpHeaders(["host"]), /protected/);
+  assert.throws(() => normalizeIgnoredHttpHeaders(["content-length"]), /protected/);
+  assert.throws(() => normalizeIgnoredHttpHeaders(["expect"]), /protected/);
 });

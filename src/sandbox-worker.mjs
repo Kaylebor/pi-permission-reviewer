@@ -4,7 +4,6 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import {
   callbackDestinationKey,
   httpRequestScopeFingerprint,
-  isUninspectableHttpRequest,
   requestDestinationKey,
   summarizeHttpRequest,
 } from "./http-request.mjs";
@@ -54,7 +53,7 @@ async function start(message) {
   lifecycle = "starting";
   try {
     const settings = message.httpInspection === true
-      ? withHttpInspection(message.settings, message.toolCallId)
+      ? withHttpInspection(message.settings, message.toolCallId, message.httpIgnoredHeaders)
       : message.settings;
     await SandboxManager.initialize(settings, ({ host, port }) => {
       if (!isActive() || !process.connected) return Promise.resolve(false);
@@ -160,7 +159,7 @@ function ensureActive() {
   if (!isActive() || controller.signal.aborted) throw new Error("aborted");
 }
 
-function withHttpInspection(settings, toolCallId) {
+function withHttpInspection(settings, toolCallId, ignoredHeaders = []) {
   const network = settings?.network && typeof settings.network === "object"
     ? settings.network
     : {};
@@ -180,39 +179,46 @@ function withHttpInspection(settings, toolCallId) {
           return { action: "allow" };
         }
         if (!isActive() || !process.connected) {
+          send({
+            type: "http-policy-denial",
+            toolCallId,
+            error: "HTTP request review unavailable",
+          });
           return { action: "deny", reason: "HTTP request review unavailable" };
         }
-        let summary;
-        try {
-          summary = await summarizeHttpRequest(request);
-        } catch {
-          return { action: "deny", reason: "HTTP request metadata inspection failed" };
-        }
-        if (isUninspectableHttpRequest(summary)) {
-          return {
-            action: "deny",
-            reason: "HTTP request body cannot be inspected for this method; use POST or PUT",
-          };
-        }
-        const scopeFingerprint = httpRequestScopeFingerprint(request, summary, httpScopeSecret);
-        const requestId = `${toolCallId}:http:${++requestCounter}`;
         executionTimeout.pause();
-        const allow = await new Promise((resolve) => {
-          pendingHttp.set(requestId, (decision) => {
-            executionTimeout.resume();
-            resolve(decision);
-          });
-          send({
-            type: "http-request",
-            toolCallId,
-            requestId,
+        try {
+          const summary = await summarizeHttpRequest(request);
+          const scopeFingerprint = httpRequestScopeFingerprint(
+            request,
             summary,
-            scopeFingerprint,
+            httpScopeSecret,
+            { ignoredHeaders },
+          );
+          const requestId = `${toolCallId}:http:${++requestCounter}`;
+          const allow = await new Promise((resolve) => {
+            pendingHttp.set(requestId, resolve);
+            send({
+              type: "http-request",
+              toolCallId,
+              requestId,
+              summary,
+              scopeFingerprint,
+            });
           });
-        });
-        return allow
-          ? { action: "allow" }
-          : { action: "deny", reason: "HTTP request denied by permission review" };
+          return allow
+            ? { action: "allow" }
+            : { action: "deny", reason: "HTTP request denied by permission review" };
+        } catch {
+          send({
+            type: "http-policy-denial",
+            toolCallId,
+            error: "HTTP request metadata inspection failed",
+          });
+          return { action: "deny", reason: "HTTP request metadata inspection failed" };
+        } finally {
+          executionTimeout.resume();
+        }
       },
     },
   };
