@@ -29,6 +29,12 @@ shape, minimum-access retries, automatic Git/network handling, and one-use
 per-call authorization semantics. It is deliberately separate from enforcement
 and remains available when a custom `SYSTEM.md` bypasses tool prompt guidelines.
 
+Runtime ownership is inspected at session start and by the status command. The
+extension compares Pi's effective tool source path with its own loaded extension
+path and warns when another registration wins; it also
+reports whether `read`, `write`, and `edit` remain Pi built-ins. This is an
+operational conflict diagnostic, not proof against malicious in-process code.
+
 The reviewer system prompt includes a built-in implicit-authorization rule for
 bounded, task-relevant reads of repository context, project instructions,
 installed skill definitions, and documentation. An optional trusted Markdown
@@ -110,6 +116,8 @@ review rather than relying on semver for an unpublished internal API.
 
 The current reactive bridge covers public-looking HTTPS destinations on port
 443. It cannot inspect HTTP method, path, request body, or resolved DNS address,
-so it is not credential-aware authorization. Explicit filesystem and
+so each allow is deliberately evaluated as authority over the whole host-port
+channel for the rest of that command. Reviewer and agent prompts carry that
+limitation; it is not credential-aware authorization. Explicit filesystem and
 Unix-socket requests are preflight-only and separate from that live bridge;
 reactive local binding and curated known-host capabilities remain future work.

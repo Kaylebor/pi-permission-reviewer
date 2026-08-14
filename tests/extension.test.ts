@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Value } from "typebox/value";
 import permissionReviewer, {
@@ -65,6 +66,7 @@ test("effective guarded bash appends stable per-call capability guidance", async
   writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
   process.env.PI_PERM_USER_CONFIG = piPermConfig;
   let registered: { name: string; promptGuidelines?: string[] } | undefined;
+  let effectiveSourcePath = fileURLToPath(new URL("../extensions/index.ts", import.meta.url));
   const handlers = new Map<string, (...args: any[]) => unknown>();
   await permissionReviewer({
     events: { emit() {} },
@@ -73,7 +75,13 @@ test("effective guarded bash appends stable per-call capability guidance", async
     },
     registerCommand() {},
     getAllTools() {
-      return registered ? [{ ...registered, sourceInfo: { source: "extension" } }] : [];
+      return registered ? [{
+        ...registered,
+        sourceInfo: {
+          source: "extension",
+          path: effectiveSourcePath,
+        },
+      }] : [];
     },
     on(name: string, handler: (...args: any[]) => unknown) {
       handlers.set(name, handler);
@@ -89,6 +97,7 @@ test("effective guarded bash appends stable per-call capability guidance", async
   assert.match(result.systemPrompt ?? "", /one-use capability bound to the exact tool call/);
   assert.match(result.systemPrompt ?? "", /does not authorize retries or later commands/);
   assert.match(result.systemPrompt ?? "", /all Unix sockets for that one invocation/);
+  assert.match(result.systemPrompt ?? "", /cannot inspect HTTP method, path, headers, body, credentials, or the resolved IP/);
   assert.equal(beforeStart({
     ...event,
     systemPrompt: result.systemPrompt,
@@ -97,8 +106,41 @@ test("effective guarded bash appends stable per-call capability guidance", async
     ...event,
     systemPromptOptions: { selectedTools: ["read"] },
   }), undefined);
-  registered!.promptGuidelines = [];
+  effectiveSourcePath = join(runtime, "competing-extension.ts");
   assert.equal(beforeStart(event), undefined);
+});
+
+test("session start warns when another extension owns the effective Bash tool", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const notices: Array<{ message: string; level: string }> = [];
+  await permissionReviewer({
+    events: { emit() {} },
+    registerTool() {},
+    registerCommand() {},
+    getAllTools: () => [{
+      name: "bash",
+      promptGuidelines: ["competing executor"],
+      sourceInfo: { source: "extension" },
+    }],
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  } as any);
+  await handlers.get("session_start")!({}, {
+    ui: {
+      notify(message: string, level: string) {
+        notices.push({ message, level });
+      },
+    },
+  });
+  assert.ok(notices.some(({ message, level }) =>
+    level === "warning" && /another extension or configuration owns Pi's effective bash tool/.test(message)
+  ));
 });
 
 test("an explicit read request forces level-zero review and stays in the bound input", async () => {

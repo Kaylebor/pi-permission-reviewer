@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      pi-runtime:
+        patterns:
+          - "@earendil-works/pi-*"
+      sandbox-boundary:
+        patterns:
+          - "@anthropic-ai/sandbox-runtime"
+          - "pi-perm"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

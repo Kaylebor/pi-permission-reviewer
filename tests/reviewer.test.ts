@@ -14,6 +14,7 @@ test("Guardian prompt permits bounded implicit context reads and accepts local e
   assert.match(builtIn, /installed skill definitions/);
   assert.match(builtIn, /user need not name every such file/);
   assert.match(builtIn, /does not authorize[\s\S]*credentials or secrets/);
+  assert.match(builtIn, /cannot inspect its HTTP method, URL path/);
 
   const extended = buildReviewerSystemPrompt(
     "Allow bounded reads of my portable agent configuration.",
@@ -101,6 +102,7 @@ test("network follow-up reuses the original reviewer and review context", async 
   assert.equal(payload.request.input.command, "git fetch origin");
   assert.match(JSON.stringify(payload.continuation), /github\.com/);
   assert.match(JSON.stringify(payload.continuation), /read-only fetch/);
+  assert.match(JSON.stringify(payload.continuation), /HTTP method, path, headers, body/);
 });
 
 test("reviewer transcripts carry the prior assessment into a local continuation", async () => {

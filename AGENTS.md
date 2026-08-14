@@ -50,6 +50,10 @@
   while this package owns the effective active Bash tool. Keep it stable,
   advisory, deduplicated, and explicit that capabilities are one-use per-call;
   never rely on prompt text as an enforcement boundary.
+- Session startup and `/permission-reviewer status` inspect effective tool
+  ownership. Preserve the exact extension-source check and prominent warning when a
+  competing registration wins; file-tool status must distinguish Pi built-ins
+  from missing or overridden executors.
 - SRT 0.0.71 grants bind and connect together for an exact macOS Unix-socket
   pathname and disables AF_UNIX isolation on Linux. Present the resulting
   Docker, Podman, and local-service control risk to reviewers; it does not
@@ -82,6 +86,10 @@
 - Direct process-local integration APIs are future design work, not supported
   behavior. Keep proposals in `docs/future-extension-integration.md` until a
   versioned contract and adversarial tests exist.
+- Default ambient extension discovery is expected to load this package in a
+  child Pi process. Explicit child extension allowlists must include it to keep
+  the gate; deliberate omission is an opt-out. MCP/custom-tool adapters remain
+  best-effort and must document their individual enforcement boundary.
 - Treat pi-perm's `audit.jsonl` as policy-stage telemetry, not a final approval
   or execution ledger. A file confirmation entry records a review handoff.
 - `guardianPromptFile` is trusted user-authored system guidance. Keep loading
@@ -102,5 +110,6 @@
   README, architecture notes, examples, and future-design notes together when a
   change affects user expectations.
 - Before committing, run `npm run check`, `npm run package:check`, and
-  `git diff --check`. The macOS runtime is exercised; Linux runtime validation
-  remains required before claiming cross-platform readiness.
+  `git diff --check`. CI repeats type, unit, and package checks on macOS and
+  Linux. The macOS runtime is exercised; Linux live SRT validation remains
+  required before claiming cross-platform runtime readiness.

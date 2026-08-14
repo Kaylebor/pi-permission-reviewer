@@ -14,11 +14,17 @@ there is one `tool_call` gate and one bash execution boundary.
 
 ## Status
 
-Early development release. The review-level engine, conservative bash router,
-fail-closed model invocation, exact-input locking, and `pi-perm` composition are
-implemented. Configuration and adversarial coverage will evolve before an npm
-release. The current reactive worker has been exercised on macOS; Linux runtime
-validation is still pending and Windows is not currently a supported target.
+Private beta. The current macOS path is exercised in local use, including the
+reactive network worker, Git fsmonitor compatibility, SSH-agent access, and SSH
+commit signing. Linux receives the same type, unit, and package checks in CI,
+but its real Sandbox Runtime path remains provisional until it is exercised on
+a Linux host. Windows is not currently a supported target.
+
+| Platform | Automated checks | Live runtime status |
+| --- | --- | --- |
+| macOS | Type, unit, and package checks | Exercised |
+| Linux | Type, unit, and package checks | Provisional; live SRT validation pending |
+| Windows | None | Unsupported |
 
 Tiered model review applies to agent-issued `bash` calls and to `pi-perm`
 confirmation decisions for Pi's built-in `read`, `write`, and `edit` tools.
@@ -27,6 +33,12 @@ arbitrary custom tools, MCP actions, and user-entered `!` commands are not
 covered by the reviewer chain. If another extension replaces an effective
 `read`, `write`, or `edit` tool, this package blocks that call instead of
 approving an executor it does not own.
+
+At session start and in `/permission-reviewer status`, runtime health reports
+whether this package owns Pi's effective `bash` tool and whether the effective
+file tools are Pi built-ins. A competing Bash registration produces a prominent
+warning: review hooks may still run, but this package cannot guarantee that its
+capability-consuming sandbox executor will receive the approved call.
 
 ### Trust boundary
 
@@ -56,6 +68,12 @@ allowlist, `defaultExtensions: []`, `--no-extensions`, or an extension-denying
 capability ceiling can exclude it. Extension presence or launch acknowledgement
 alone does not prove effective executor ownership. Parent and child review
 state are never shared.
+
+With the default ambient extension discovery and no child-specific extension
+changes, loading this package again in the child is the expected behavior. If a
+launcher supplies an explicit extension list, include this package explicitly
+to retain checks. Omitting it is a supported way to disable this gate for that
+child, but should be treated as a conscious trust-boundary change.
 
 ## Install from GitHub
 
@@ -367,7 +385,12 @@ from locally supplied messages.
 
 Allowing the destination resumes the same process; the command is not rerun.
 The decision is bound to the exact Pi tool-call ID and cached only for that
-host-port pair for the lifetime of that command. Explicit SRT deny rules remain
+host-port pair for the lifetime of that command. An allow therefore authorizes
+any traffic the process sends over that destination channel; the extension
+cannot distinguish HTTP methods, paths, headers, bodies, credentials, or a
+changed DNS resolution. Reviewer and main-agent prompts state this explicitly
+so the decision is made at the actual available granularity. Explicit SRT deny
+rules remain
 authoritative and never reach the reviewer. Headless operation denies off-list
 connections. Reviews are serialized, limited to eight distinct destinations per
 command, and cancelled after 30 seconds or when the command ends. Reactive
@@ -389,7 +412,8 @@ denials for common SSH, cloud, container, package-manager, Git credential, Pi,
 Codex, and macOS Keychain paths. These are defense-in-depth controls, not a
 complete secret detector.
 
-The reactive network bridge covers only public-looking HTTPS destinations.
+The reactive network bridge covers only public-looking HTTPS destinations and
+is reviewer-assisted egress control, not HTTP-aware authorization or DLP.
 Filesystem and Unix-socket access is preflight-only through the explicit Bash
 request above; there is no post-failure discovery or automatic replay. A curated
 and user-expandable catalogue of common host-port combinations is intentionally
@@ -413,6 +437,15 @@ See `THIRD_PARTY_NOTICES.md` for attribution.
 Ideas for safe inter-extension composition are recorded separately in
 [`docs/future-extension-integration.md`](docs/future-extension-integration.md);
 they are not current guarantees.
+
+## Dependency watchlist
+
+Dependabot checks the pinned Pi runtime, `pi-perm`, Sandbox Runtime, and GitHub
+Actions dependencies. Pi packages are grouped separately from the sandbox
+boundary so each update can receive the compatibility or security review its
+role requires. CI runs the type, unit, and package checks on macOS and Linux;
+this Linux job is portability coverage, not yet evidence of a live Linux SRT
+execution path.
 
 ## Development
 

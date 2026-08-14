@@ -34,6 +34,11 @@ reviewer histories, or configuration generation state with the parent. Explicit
 extension restrictions can exclude the package and must remain visible in
 launch diagnostics. Presence or runtime acknowledgement proves loading at most,
 not that this package owns the active bash executor or remains healthy.
+The ordinary default—ambient discovery with no child-specific extension
+changes—is expected to load the gate independently. Launchers that replace the
+ambient set with an explicit allowlist should list this package when they want
+the child protected. Deliberately omitting it is a valid opt-out, not an
+accidental inheritance of the parent's protection.
 
 The parent's outer `subagent` invocation is a non-bash Pi tool call, but the
 launcher extension's process creation, worktree operations, hooks, sharing, and
@@ -46,6 +51,10 @@ not emit a Pi tool call. The model cannot directly call those APIs, but
 extension tools, commands, event handlers, timers, or background work can invoke
 them without a new tool call. A custom tool that wraps them expands the trusted
 computing base and can bypass this gate after its outer tool call is allowed.
+MCP tools have the same limitation: their server-side effects are not
+generically expressible as Pi Bash or file-tool capabilities. Popular tools may
+eventually receive purpose-built adapters, but coverage remains best-effort and
+must be documented per adapter.
 
 ## Goals
 
@@ -84,11 +93,12 @@ The cleanest upstream boundary would separate policy from Pi registration:
 This would remove this project's private imports, but would not by itself make
 direct extension-side effects safe.
 
-### 2. Process-local cooperative broker
+### 2. Process-local cooperative adapter surface
 
-This package could first define a versioned internal broker interface behind its
-own execution boundary. It is not a public package API, process-global registry,
-or a general inter-extension approval service. Any later cooperative discovery
+This package could define a versioned adapter interface behind its own execution
+boundary once a concrete custom-tool or MCP integration exists. It is not yet a
+public package API, process-global registry, or general inter-extension approval
+service. Any later cooperative discovery
 mechanism would need duplicate-owner detection, version negotiation, explicit
 disposal on reload, bounded metadata, fail-closed behavior when a required
 broker is absent, and an explicit decision to widen the supported API surface.
@@ -143,9 +153,10 @@ Any implementation should include:
 ## Suggested sequence
 
 1. Propose a stable typed engine API upstream to pi-perm.
-2. Add a startup/runtime self-check of Pi's effective bash tool source and fail
-   closed on conflicting ownership. This protects against accidental or
-   cooperative conflicts, not malicious in-process code.
+2. Keep the implemented startup/status ownership warning visible, and decide
+   from real extension conflicts whether secure profiles should optionally fail
+   closed instead of warning. This protects against accidental or cooperative
+   conflicts, not malicious in-process code.
 3. Define a narrow capability-ceiling contract for cooperative launchers.
 4. Add a child pre-model handshake that requires the expected gate version,
    health, and active executor ownership.

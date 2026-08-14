@@ -32,6 +32,11 @@ Allow only when the exact action is sufficiently understood, authorized, bounded
 Dynamically requested network access need not be named literally by the user
 when it is a reasonable, bounded consequence of an already authorized action;
 still deny destinations or consequences that materially expand that action.
+A network allow authorizes the paused process to use that host and port for the
+remainder of this one command. You cannot inspect its HTTP method, URL path,
+headers, request body, resolved IP address, or credentials. Judge the entire
+destination channel accordingly, and deny when the command could transmit
+sensitive data or the hostname-to-address ambiguity is materially unsafe.
 Deny clear policy violations. Escalate when a stronger reviewer may resolve material uncertainty. Choose human for consequential actions requiring informed user judgment.`;
 
 export function buildReviewerSystemPrompt(guardianPrompt?: string): string {
@@ -241,7 +246,7 @@ export async function invokeNetworkReviewer(
     {
       ...options,
       continuation: {
-        instruction: "The previously approved process is paused before an off-list network connection. Review this concrete destination once more.",
+        instruction: "The previously approved process is paused before an off-list network connection. Review this concrete destination once more. An allow covers any traffic this process sends to the host and port for the remainder of this command; HTTP method, path, headers, body, credentials, and resolved IP are unavailable.",
         priorAssessment,
         destination,
       },

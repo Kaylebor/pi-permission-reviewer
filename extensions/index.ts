@@ -6,6 +6,8 @@ import type {
 import * as PiAgent from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   ApprovalStore,
   canonicalSha256,
@@ -77,12 +79,13 @@ const BASH_CAPABILITY_GUIDELINE =
   "Use bash permissions.read, permissions.publicKeyRead, permissions.write, permissions.unixSockets, or permissions.sshAgent when a contained command needs additional access. publicKeyRead accepts only a validated owner-controlled SSH .pub file and enters permission review even beneath a protected directory. Resubmit the exact command, use normalized absolute paths, and request only the minimum necessary access. Linux Unix-socket and SSH-agent requests grant all Unix sockets for that one invocation.";
 
 const MAIN_AGENT_GUIDANCE_MARKER = "<permission_reviewer_guidance>";
+const EXTENSION_SOURCE_PATH = realpathSync(fileURLToPath(import.meta.url));
 const MAIN_AGENT_PERMISSION_GUIDANCE = `${MAIN_AGENT_GUIDANCE_MARKER}
 The bash tool runs commands inside a contained sandbox by default. Do not request broader access speculatively. When a command predictably needs access outside that boundary, include only the minimum exact capability in that bash call's permissions object: read, publicKeyRead, write, unixSockets, or sshAgent. Filesystem and socket paths must be normalized and absolute.
 
 Each authorization is a one-use capability bound to the exact tool call, command input, working directory, session, and current configuration. It does not change persistent policy and does not authorize retries or later commands. If a contained call fails for missing access, resubmit the unchanged command as a new call with only the indicated capability.
 
-Recognized Git operations may derive fsmonitor, validated signing-public-key, and SSH-agent capabilities automatically. Public HTTPS network access is reviewed reactively and does not require unrelated filesystem or socket permissions. On Linux, unixSockets or sshAgent exposes all Unix sockets for that one invocation, including potentially sensitive local services, so request either only when necessary.
+Recognized Git operations may derive fsmonitor, validated signing-public-key, and SSH-agent capabilities automatically. Public HTTPS network access is reviewed reactively and does not require unrelated filesystem or socket permissions. A destination approval covers that host and port for the remainder of the command; the reviewer cannot inspect HTTP method, path, headers, body, credentials, or the resolved IP. On Linux, unixSockets or sshAgent exposes all Unix sockets for that one invocation, including potentially sensitive local services, so request either only when necessary.
 </permission_reviewer_guidance>`;
 
 export default async function permissionReviewer(pi: ExtensionAPI) {
@@ -218,7 +221,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
   pi.on("before_agent_start", (event) => {
     if (!event.systemPromptOptions.selectedTools?.includes("bash")) return;
     const effectiveBash = pi.getAllTools().find(({ name }) => name === "bash");
-    if (!effectiveBash?.promptGuidelines?.includes(BASH_CAPABILITY_GUIDELINE)) return;
+    if (!isOwnExtensionSource(effectiveBash?.sourceInfo.path)) return;
     if (event.systemPrompt.includes(MAIN_AGENT_GUIDANCE_MARKER)) return;
     return {
       systemPrompt: `${event.systemPrompt}\n\n${MAIN_AGENT_PERMISSION_GUIDANCE}`,
@@ -245,6 +248,13 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     activeExecutions.clear();
     await permissions.resetSession();
     for (const warning of loaded.warnings) ctx.ui.notify(warning, "warning");
+    const runtimeHealth = inspectRuntimeHealth(pi);
+    if (!runtimeHealth.bashOwned) {
+      ctx.ui.notify(runtimeHealth.bashMessage, "warning");
+    }
+    if (runtimeHealth.builtinFiles.some(({ owned }) => !owned)) {
+      ctx.ui.notify(runtimeFileStatus(runtimeHealth), "warning");
+    }
     ctx.ui.notify(
       loaded.config.reviewers.length > 0
         ? `pi-permission-reviewer loaded with ${new Set(loaded.config.reviewers.map(({ level }) => level)).size} review level(s)`
@@ -713,6 +723,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     handler: async (args, ctx) =>
       handleConfigCommand(args, ctx, {
         getLoaded: () => loaded,
+        getRuntimeStatus: () => runtimeStatusLines(inspectRuntimeHealth(pi)),
         setLoaded: (next) => {
           loaded = next;
           configGeneration += 1;
@@ -726,6 +737,59 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         },
       }),
   });
+}
+
+interface RuntimeHealth {
+  bashOwned: boolean;
+  bashMessage: string;
+  builtinFiles: Array<{ name: "read" | "write" | "edit"; owned: boolean }>;
+}
+
+function inspectRuntimeHealth(pi: ExtensionAPI): RuntimeHealth {
+  try {
+    const tools = pi.getAllTools();
+    const bash = tools.find(({ name }) => name === "bash");
+    const bashOwned = isOwnExtensionSource(bash?.sourceInfo.path);
+    return {
+      bashOwned,
+      bashMessage: bashOwned
+        ? "Runtime: guarded Bash owns Pi's effective bash tool"
+        : "Runtime warning: another extension or configuration owns Pi's effective bash tool; pi-permission-reviewer cannot guarantee Bash sandboxing or capability consumption in this session",
+      builtinFiles: (["read", "write", "edit"] as const).map((name) => ({
+        name,
+        owned: tools.find((tool) => tool.name === name)?.sourceInfo.source === "builtin",
+      })),
+    };
+  } catch (error) {
+    return {
+      bashOwned: false,
+      bashMessage: `Runtime warning: effective tool ownership could not be inspected (${error instanceof Error ? error.message : String(error)})`,
+      builtinFiles: (["read", "write", "edit"] as const).map((name) => ({
+        name,
+        owned: false,
+      })),
+    };
+  }
+}
+
+function isOwnExtensionSource(sourcePath: string | undefined): boolean {
+  if (!sourcePath) return false;
+  try {
+    return realpathSync(sourcePath) === EXTENSION_SOURCE_PATH;
+  } catch {
+    return false;
+  }
+}
+
+function runtimeStatusLines(health: RuntimeHealth): string[] {
+  return [health.bashMessage, runtimeFileStatus(health)];
+}
+
+function runtimeFileStatus(health: RuntimeHealth): string {
+  const files = health.builtinFiles
+    .map(({ name, owned }) => `${name}=${owned ? "Pi built-in" : "missing or overridden"}`)
+    .join(", ");
+  return `${health.builtinFiles.every(({ owned }) => owned) ? "Runtime" : "Runtime warning"} file executors: ${files}`;
 }
 
 async function humanReview(

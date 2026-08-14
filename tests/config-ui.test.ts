@@ -210,13 +210,43 @@ test("configure UI exposes boundary review controls and status", async () => {
         modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false },
         ui: { notify(message: string) { notices.push(message); } },
       } as any,
-      { getLoaded: () => loaded, setLoaded() {} },
+      {
+        getLoaded: () => loaded,
+        setLoaded() {},
+        getRuntimeStatus: () => ["Runtime: guarded Bash owns Pi's effective bash tool"],
+      },
     );
     assert.match(notices.at(-1) ?? "", /Boundary review: public-key reads block, Git fsmonitor enabled, Git SSH agent block/);
+    assert.match(notices.at(-1) ?? "", /Runtime: guarded Bash owns Pi's effective bash tool/);
   } finally {
     if (previous === undefined) delete process.env.PI_PERMISSION_REVIEWER_CONFIG;
     else process.env.PI_PERMISSION_REVIEWER_CONFIG = previous;
   }
+});
+
+test("status surfaces a competing Bash owner as a warning", async () => {
+  const loaded = loadConfig(join(mkdtempSync(join(tmpdir(), "pi-permission-reviewer-ui-")), "missing.json"));
+  const notices: Array<{ message: string; level: string }> = [];
+  await handleConfigCommand(
+    "status",
+    {
+      hasUI: true,
+      scopedModels: [],
+      modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false },
+      ui: {
+        notify(message: string, level: string) {
+          notices.push({ message, level });
+        },
+      },
+    } as any,
+    {
+      getLoaded: () => loaded,
+      setLoaded() {},
+      getRuntimeStatus: () => ["Runtime warning: competing Bash owner"],
+    },
+  );
+  assert.equal(notices.at(-1)?.level, "warning");
+  assert.match(notices.at(-1)?.message ?? "", /competing Bash owner/);
 });
 
 test("Guardian prompt editor saves the configured Markdown and status only reports its source", async () => {

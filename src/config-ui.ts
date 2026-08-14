@@ -28,6 +28,7 @@ type ConfigContext = Pick<
 export interface ConfigCommandOptions {
   getLoaded(): LoadedConfig;
   setLoaded(loaded: LoadedConfig): void;
+  getRuntimeStatus?(): string[];
 }
 
 const ACTIONS = [
@@ -48,7 +49,9 @@ export async function handleConfigCommand(
   options: ConfigCommandOptions,
 ): Promise<void> {
   const subcommand = args.trim().toLowerCase() || "menu";
-  if (subcommand === "status") return showStatus(ctx, options.getLoaded());
+  if (subcommand === "status") {
+    return showStatus(ctx, options.getLoaded(), options.getRuntimeStatus?.());
+  }
   if (subcommand === "models") return showModels(ctx);
   if (subcommand === "reload") {
     const loaded = (await import("./config.ts")).loadConfig();
@@ -67,7 +70,7 @@ export async function handleConfigCommand(
     return;
   }
   if (!ctx.hasUI) {
-    showStatus(ctx, options.getLoaded());
+    showStatus(ctx, options.getLoaded(), options.getRuntimeStatus?.());
     return;
   }
   const action = await ctx.ui.select("Permission reviewer configuration", [
@@ -75,7 +78,9 @@ export async function handleConfigCommand(
     ...ACTIONS,
   ]);
   if (!action) return;
-  if (action === "Show status") return showStatus(ctx, options.getLoaded());
+  if (action === "Show status") {
+    return showStatus(ctx, options.getLoaded(), options.getRuntimeStatus?.());
+  }
   if (action === "Add a reviewer") return addReviewer(ctx, options);
   if (action === "Remove a reviewer") return removeReviewer(ctx, options);
   if (action === "Move a tied reviewer") return moveReviewer(ctx, options);
@@ -110,7 +115,11 @@ function modelSpecs(
   ].sort((left, right) => left.localeCompare(right));
 }
 
-function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void {
+function showStatus(
+  ctx: Pick<ConfigContext, "ui">,
+  loaded: LoadedConfig,
+  runtimeStatus: string[] = [],
+): void {
   const reviewContext = loaded.config.reviewContext ?? {
     mode: "transcript",
     conversationTokens: 4_000,
@@ -140,8 +149,13 @@ function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void 
       `Context: ${reviewContext.mode}, ${reviewContext.conversationTokens} conversation tokens + ${reviewContext.toolTokens} tool tokens, ${reviewContext.persistence} persistence`,
       `Reactive review: ${reactiveReview.reasoning}${reactiveReview.reasoning === "one-lower" ? ` (floor ${reactiveReview.floor})` : ""}`,
       `Boundary review: public-key reads ${boundaryReview.publicKeyRead}, Git fsmonitor ${boundaryReview.gitFsmonitor ? "enabled" : "disabled"}, Git SSH agent ${boundaryReview.gitSshAgent}`,
+      ...runtimeStatus,
     ].join("\n"),
-    loaded.valid ? "info" : "error",
+    !loaded.valid
+      ? "error"
+      : runtimeStatus.some((line) => line.startsWith("Runtime warning:"))
+        ? "warning"
+        : "info",
   );
 }
 
