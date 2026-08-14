@@ -29,6 +29,7 @@ export const DEFAULT_REVIEW_CONTEXT = {
 export const DEFAULT_REACTIVE_REVIEW = {
   reasoning: "one-lower",
   floor: "low",
+  inspection: "destination",
 } as const;
 export const DEFAULT_BOUNDARY_REVIEW = {
   publicKeyRead: "review",
@@ -149,6 +150,7 @@ function validateReactiveReview(value: unknown): NonNullable<PermissionReviewerC
   if (!isRecord(value)) throw new Error("reactiveReview must be an object");
   const reasoning = value.reasoning ?? DEFAULT_REACTIVE_REVIEW.reasoning;
   const floor = value.floor ?? DEFAULT_REACTIVE_REVIEW.floor;
+  const inspection = value.inspection ?? DEFAULT_REACTIVE_REVIEW.inspection;
   const validReasoning = [
     "inherit",
     "one-lower",
@@ -167,9 +169,13 @@ function validateReactiveReview(value: unknown): NonNullable<PermissionReviewerC
   if (typeof floor !== "string" || !validFloors.includes(floor)) {
     throw new Error("reactiveReview.floor is invalid");
   }
+  if (inspection !== "destination" && inspection !== "http-metadata") {
+    throw new Error("reactiveReview.inspection must be destination or http-metadata");
+  }
   return {
     reasoning: reasoning as NonNullable<PermissionReviewerConfig["reactiveReview"]>["reasoning"],
     floor: floor as NonNullable<PermissionReviewerConfig["reactiveReview"]>["floor"],
+    inspection,
   };
 }
 

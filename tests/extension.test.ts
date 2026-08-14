@@ -239,13 +239,13 @@ test("a validated public-key capability can review an exact read beneath .ssh", 
 });
 
 test("reactive continuation lowers only above the configured floor", () => {
-  const config = { reasoning: "one-lower" as const, floor: "low" as const };
+  const config = { reasoning: "one-lower" as const, floor: "low" as const, inspection: "destination" as const };
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "xhigh" }, config), "high");
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "medium" }, config), "low");
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "low" }, config), "low");
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "minimal" }, config), "minimal");
   assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "max" }, config), "xhigh");
-  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "high" }, { reasoning: "minimum", floor: "low" }), "minimal");
+  assert.equal(resolveReactiveReasoning({ level: 0, model: "test/model", reasoning: "high" }, { reasoning: "minimum", floor: "low", inspection: "destination" }), "minimal");
 });
 
 test("reactive network review is limited to public-looking HTTPS", () => {

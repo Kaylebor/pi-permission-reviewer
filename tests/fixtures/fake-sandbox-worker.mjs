@@ -1,6 +1,7 @@
 let responses = 0;
 let expectedResponses = 2;
 let invocationNonce;
+let invocationToolCallId;
 
 function send(message) {
   process.send({ ...message, invocationNonce });
@@ -9,6 +10,7 @@ function send(message) {
 process.on("message", (message) => {
   if (message.type === "start") {
     invocationNonce = message.invocationNonce;
+    invocationToolCallId = message.toolCallId;
     if (message.command === "timeout-probe") {
       send({ type: "output", data: Buffer.from(String(message.timeoutMs)).toString("base64") });
       send({ type: "result", exitCode: 0 });
@@ -33,6 +35,17 @@ process.on("message", (message) => {
         type: "network-request",
         toolCallId: message.toolCallId,
         requestId: "wait-1",
+        host: "example.com",
+        port: 443,
+      });
+      return;
+    }
+    if (message.command === "http") {
+      expectedResponses = 1;
+      send({
+        type: "network-request",
+        toolCallId: message.toolCallId,
+        requestId: "http-destination",
         host: "example.com",
         port: 443,
       });
@@ -130,6 +143,24 @@ process.on("message", (message) => {
     });
   }
   if (message.type === "network-response") {
+    if (message.requestId === "http-destination" && message.allow === true) {
+      expectedResponses = 2;
+      responses = 0;
+      const summary = {
+        method: "GET",
+        origin: "https://example.com",
+        path: "/resource",
+        queryParameterNames: ["page"],
+        sensitiveQueryParameterNames: [],
+        headerNames: ["accept"],
+        sensitiveHeaderNames: [],
+        bodyPresent: false,
+      };
+      const scopeFingerprint = "a".repeat(64);
+      send({ type: "http-request", toolCallId: invocationToolCallId, requestId: "http-1", summary, scopeFingerprint });
+      send({ type: "http-request", toolCallId: invocationToolCallId, requestId: "http-2", summary, scopeFingerprint });
+      return;
+    }
     if (message.requestId === "invalid-1") {
       send({ type: "error", error: "invalid request denied" });
       process.disconnect();
@@ -143,6 +174,14 @@ process.on("message", (message) => {
     responses += 1;
     if (responses === expectedResponses) {
       send({ type: "output", data: Buffer.from("continued").toString("base64") });
+      send({ type: "result", exitCode: 0 });
+      process.disconnect();
+    }
+  }
+  if (message.type === "http-response") {
+    responses += 1;
+    if (responses === expectedResponses) {
+      send({ type: "output", data: Buffer.from("http-continued").toString("base64") });
       send({ type: "result", exitCode: 0 });
       process.disconnect();
     }

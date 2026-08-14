@@ -133,6 +133,7 @@ test("configure UI exposes resumed-winner reasoning reduction", async () => {
     "Configure reactive review",
     "one-lower — reduce one step, then use the configured floor",
     "low",
+    "http-metadata — experimentally review sanitized HTTP(S) request metadata",
   ];
   try {
     await handleConfigCommand(
@@ -157,6 +158,7 @@ test("configure UI exposes resumed-winner reasoning reduction", async () => {
     assert.deepEqual(loaded.config.reactiveReview, {
       reasoning: "one-lower",
       floor: "low",
+      inspection: "http-metadata",
     });
   } finally {
     if (previous === undefined) delete process.env.PI_PERMISSION_REVIEWER_CONFIG;

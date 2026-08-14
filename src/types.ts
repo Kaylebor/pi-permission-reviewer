@@ -28,6 +28,8 @@ export type ReactiveReasoning =
 export interface ReactiveReviewConfig {
   reasoning: ReactiveReasoning;
   floor: ThinkingLevel;
+  /** Experimental request-level inspection for dynamically approved HTTP(S). */
+  inspection: "destination" | "http-metadata";
 }
 
 export interface BoundaryReviewConfig {

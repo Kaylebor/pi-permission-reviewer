@@ -31,6 +31,7 @@ test("accepts tied and sparse reviewer levels", () => {
   assert.deepEqual(config.reactiveReview, {
     reasoning: "one-lower",
     floor: "low",
+    inspection: "destination",
   });
   assert.deepEqual(config.boundaryReview, {
     publicKeyRead: "review",
@@ -88,10 +89,19 @@ test("validates reactive continuation reasoning", () => {
   assert.deepEqual(config.reactiveReview, {
     reasoning: "inherit",
     floor: "minimal",
+    inspection: "destination",
   });
   assert.throws(
     () => validateConfig({ reviewers: [], reactiveReview: { reasoning: "cheapest" } }),
     /reactiveReview\.reasoning is invalid/,
+  );
+  assert.equal(
+    validateConfig({ reviewers: [], reactiveReview: { inspection: "http-metadata" } }).reactiveReview?.inspection,
+    "http-metadata",
+  );
+  assert.throws(
+    () => validateConfig({ reviewers: [], reactiveReview: { inspection: "raw" } }),
+    /reactiveReview\.inspection must be destination or http-metadata/,
   );
 });
 

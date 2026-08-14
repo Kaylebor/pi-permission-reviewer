@@ -2,6 +2,7 @@ import type { ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-
 import type { Message, ThinkingLevel } from "@earendil-works/pi-ai";
 import { parseModelSpec } from "./config.ts";
 import type { ReviewContextEvidence } from "./context-ledger.ts";
+import type { HttpRequestSummary } from "./http-request.mjs";
 import type { ReviewerInvocation } from "./levels.ts";
 import type {
   ReviewAssessment,
@@ -32,11 +33,13 @@ Allow only when the exact action is sufficiently understood, authorized, bounded
 Dynamically requested network access need not be named literally by the user
 when it is a reasonable, bounded consequence of an already authorized action;
 still deny destinations or consequences that materially expand that action.
-A network allow authorizes the paused process to use that host and port for the
-remainder of this one command. You cannot inspect its HTTP method, URL path,
-headers, request body, resolved IP address, or credentials. Judge the entire
-destination channel accordingly, and deny when the command could transmit
-sensitive data or the hostname-to-address ambiguity is materially unsafe.
+A destination allow authorizes the paused process to use that host and port for
+the remainder of this one command. Unless a later continuation explicitly
+provides a sanitized HTTP request summary, you cannot inspect its method, URL
+path, headers, request body, resolved IP address, or credentials. A sanitized
+summary never contains header values, query values, or raw body bytes. Judge
+unknown traffic as the entire destination channel, and deny when the command
+could transmit sensitive data or hostname-to-address ambiguity is unsafe.
 Deny clear policy violations. Escalate when a stronger reviewer may resolve material uncertainty. Choose human for consequential actions requiring informed user judgment.`;
 
 export function buildReviewerSystemPrompt(guardianPrompt?: string): string {
@@ -256,6 +259,39 @@ export async function invokeNetworkReviewer(
         instruction: "The previously approved process is paused before an off-list network connection. Review this concrete destination once more. An allow covers any traffic this process sends to the host and port for the remainder of this command; HTTP method, path, headers, body, credentials, and resolved IP are unavailable.",
         priorAssessment,
         destination,
+      },
+    },
+  );
+}
+
+export async function invokeHttpReviewer(
+  registry: ModelRegistry,
+  reviewer: ReviewerConfig,
+  request: ReviewRequest,
+  priorAssessment: ReviewAssessment,
+  httpRequest: HttpRequestSummary,
+  policy: string | undefined,
+  signal: AbortSignal | undefined,
+  options: {
+    evidence?: ReviewContextEvidence;
+    transcript?: ReviewerTranscript;
+    reasoning?: ThinkingLevel;
+    caseId?: string;
+    guardianPrompt?: string;
+  } = {},
+): ReturnType<typeof invokeModelReviewer> {
+  return invokeModelReviewer(
+    registry,
+    { reviewer },
+    request,
+    policy,
+    signal,
+    {
+      ...options,
+      continuation: {
+        instruction: "The previously approved process and destination are paused before one HTTP request. Review this request-scoped shape. Header values, query values, raw body bytes, credentials, response content, and resolved IP are unavailable. An allow applies only to matching request metadata during this command; a materially different method, path, parameter/header shape, or body risk profile is reviewed again.",
+        priorAssessment,
+        sanitizedHttpRequest: httpRequest,
       },
     },
   );

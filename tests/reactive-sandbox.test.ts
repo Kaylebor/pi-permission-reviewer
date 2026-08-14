@@ -65,6 +65,36 @@ test("one host-port review resumes the original worker and is cached per command
   assert.equal(Buffer.concat(output).toString(), "continued");
 });
 
+test("HTTP metadata review is opt-in and cached by sanitized request shape", async () => {
+  let destinationReviews = 0;
+  let httpReviews = 0;
+  const httpDecisions: NetworkDecision[] = [];
+  const output: Buffer[] = [];
+  const result = await runReactiveSandbox({
+    toolCallId: "reactive-http",
+    command: "http",
+    cwd: process.cwd(),
+    settings: {},
+    workerPath,
+    httpInspection: true,
+    onData: (data) => output.push(data),
+    onNetworkRequest: async () => {
+      destinationReviews += 1;
+      return networkDecision("allow", "reviewer", "reactive-http");
+    },
+    onHttpRequest: async (summary) => {
+      httpReviews += 1;
+      assert.equal(summary.path, "/resource");
+      return networkDecision("allow", "reviewer", "reactive-http");
+    },
+    onHttpDecision: (decision) => httpDecisions.push(decision),
+  });
+  assert.equal(destinationReviews, 1);
+  assert.equal(httpReviews, 1, JSON.stringify(httpDecisions));
+  assert.equal(result.exitCode, 0);
+  assert.equal(Buffer.concat(output).toString(), "http-continued");
+});
+
 test("a mismatched tool-call request fails closed", async () => {
   let reviewed = false;
   const decisions: NetworkDecision[] = [];

@@ -4,6 +4,7 @@ import {
   buildReviewerSystemPrompt,
   createReviewerTranscript,
   invokeModelReviewer,
+  invokeHttpReviewer,
   invokeNetworkReviewer,
   parseAssessment,
   transcriptRetainsEvidence,
@@ -14,7 +15,7 @@ test("Guardian prompt permits bounded implicit context reads and accepts local e
   assert.match(builtIn, /installed skill definitions/);
   assert.match(builtIn, /user need not name every such file/);
   assert.match(builtIn, /does not authorize[\s\S]*credentials or secrets/);
-  assert.match(builtIn, /cannot inspect its HTTP method, URL path/);
+  assert.match(builtIn, /cannot inspect its method, URL\s+path/);
 
   const extended = buildReviewerSystemPrompt(
     "Allow bounded reads of my portable agent configuration.",
@@ -103,6 +104,41 @@ test("network follow-up reuses the original reviewer and review context", async 
   assert.match(JSON.stringify(payload.continuation), /github\.com/);
   assert.match(JSON.stringify(payload.continuation), /read-only fetch/);
   assert.match(JSON.stringify(payload.continuation), /HTTP method, path, headers, body/);
+});
+
+test("HTTP follow-up receives sanitized request metadata as a scoped continuation", async () => {
+  let payload: any;
+  const result = await invokeHttpReviewer(
+    {
+      find: () => ({ provider: "test", id: "reviewer" }),
+      hasConfiguredAuth: () => true,
+      complete: async (_model: unknown, context: any) => {
+        payload = JSON.parse(context.messages[0].content);
+        return {
+          stopReason: "stop",
+          content: [{ type: "text", text: '{"decision":"allow","reason":"bounded request"}' }],
+        };
+      },
+    } as any,
+    { level: 0, model: "test/reviewer" },
+    { tool: "bash", input: { command: "curl https://example.com/a" }, cwd: "/workspace", minimumLevel: 0 },
+    { decision: "allow", reason: "authorized fetch" },
+    {
+      method: "GET",
+      origin: "https://example.com",
+      path: "/a",
+      queryParameterNames: ["page"],
+      sensitiveQueryParameterNames: [],
+      headerNames: ["accept"],
+      sensitiveHeaderNames: [],
+      bodyPresent: false,
+    },
+    undefined,
+    undefined,
+  );
+  assert.equal(result.kind, "assessment");
+  assert.equal(payload.continuation.sanitizedHttpRequest.path, "/a");
+  assert.match(payload.continuation.instruction, /Header values, query values, raw body bytes/);
 });
 
 test("reviewer transcripts carry the prior assessment into a local continuation", async () => {

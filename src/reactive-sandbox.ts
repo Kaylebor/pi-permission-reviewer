@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
+import type { HttpRequestSummary } from "./http-request.mjs";
 import type { NetworkDecision } from "./review-types.ts";
 
 export interface NetworkRequest {
@@ -10,7 +11,7 @@ export interface NetworkRequest {
 }
 
 interface WorkerMessage {
-  type: "started" | "output" | "network-request" | "result" | "error";
+  type: "started" | "output" | "network-request" | "http-request" | "result" | "error";
   toolCallId?: string;
   requestId?: string;
   host?: string;
@@ -20,6 +21,8 @@ interface WorkerMessage {
   error?: string;
   childPid?: number;
   invocationNonce?: string;
+  summary?: unknown;
+  scopeFingerprint?: string;
 }
 
 export async function runReactiveSandbox(options: {
@@ -42,6 +45,13 @@ export async function runReactiveSandbox(options: {
   ): Promise<NetworkDecision>;
   /** Receives each first decision for observability without affecting IPC. */
   onNetworkDecision?(decision: NetworkDecision, destination: NetworkRequest): void;
+  /** Enables SRT's experimental TLS termination and sanitized HTTP review. */
+  httpInspection?: boolean;
+  onHttpRequest?(
+    request: HttpRequestSummary,
+    signal: AbortSignal,
+  ): Promise<NetworkDecision>;
+  onHttpDecision?(decision: NetworkDecision, request: HttpRequestSummary): void;
   /** Stable ReviewCase id when available; toolCallId remains a safe fallback. */
   caseId?: string;
   signal?: AbortSignal;
@@ -51,6 +61,7 @@ export async function runReactiveSandbox(options: {
   nodeBinary?: string;
   networkRequestLimit?: number;
   networkReviewTimeoutMs?: number;
+  httpRequestLimit?: number;
 }): Promise<{ exitCode: number | null }> {
   if (options.signal?.aborted) throw new Error("aborted");
   const settings = immutableSettings(options.settings);
@@ -68,6 +79,7 @@ export async function runReactiveSandbox(options: {
     },
   );
   const decisions = new Map<string, Promise<NetworkDecision>>();
+  const httpDecisions = new Map<string, Promise<NetworkDecision>>();
   let decisionQueue = Promise.resolve();
   const invocationNonce = randomUUID();
   const reviewLifecycle = new AbortController();
@@ -306,6 +318,114 @@ export async function runReactiveSandbox(options: {
           });
         return;
       }
+      if (message.type === "http-request") {
+        const validationError =
+          message.toolCallId !== options.toolCallId ? "tool call mismatch" :
+          typeof message.requestId !== "string" ? "missing request id" :
+          !options.httpInspection || !options.onHttpRequest ? "inspection disabled" :
+          !isHttpRequestSummary(message.summary) ? "invalid metadata" :
+          typeof message.scopeFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(message.scopeFingerprint)
+            ? "invalid cache identity" : undefined;
+        if (validationError) {
+          if (typeof message.requestId === "string") {
+            respondToHttpRequest(
+              message.requestId,
+              denyNetworkDecision(caseId, "error", `invalid HTTP request review: ${validationError}`),
+              fallbackHttpSummary(),
+            );
+          }
+          return;
+        }
+        const summary = deepFreeze(structuredClone(message.summary)) as HttpRequestSummary;
+        const requestId = message.requestId as string;
+        // Incomplete or timed-out body inspection is never cached because its
+        // opaque identity cannot cover bytes the filter did not observe.
+        const key = summary.bodyPresent && summary.bodyComplete !== true
+          ? `uncacheable:${requestId}`
+          : message.scopeFingerprint!;
+        let decision = httpDecisions.get(key);
+        if (!decision) {
+          if (httpDecisions.size >= (options.httpRequestLimit ?? 16)) {
+            respondToHttpRequest(
+              requestId,
+              denyNetworkDecision(caseId, "limit", "HTTP request review limit reached"),
+              summary,
+            );
+            return;
+          }
+          const reviewController = new AbortController();
+          const reviewSignal = AbortSignal.any([reviewLifecycle.signal, reviewController.signal]);
+          decision = decisionQueue.then(async () => {
+            if (reviewLifecycle.signal.aborted || settled) {
+              return denyNetworkDecision(caseId, "cancelled", "HTTP request review cancelled");
+            }
+            const timeout = setTimeout(
+              () => reviewController.abort(new Error("HTTP request review timed out")),
+              options.networkReviewTimeoutMs ?? 30_000,
+            );
+            try {
+              const review = Promise.resolve()
+                .then(() => options.onHttpRequest!(summary, reviewSignal))
+                .then(
+                  (response) => ({ kind: "response" as const, response }),
+                  () => ({ kind: "failure" as const }),
+                );
+              const lifecycleCancelled = abortedOutcome(reviewLifecycle.signal, "cancelled");
+              const reviewTimedOut = abortedOutcome(reviewController.signal, "timeout");
+              const outcome = await Promise.race([review, lifecycleCancelled, reviewTimedOut]);
+              if (outcome.kind === "timeout") {
+                return denyNetworkDecision(caseId, "timeout", "HTTP request review timed out");
+              }
+              if (outcome.kind === "cancelled") {
+                return denyNetworkDecision(caseId, "cancelled", "HTTP request review cancelled");
+              }
+              if (outcome.kind === "failure") {
+                return denyNetworkDecision(caseId, "error", "HTTP request reviewer failed");
+              }
+              if (!isNetworkDecision(outcome.response) || outcome.response.caseId !== caseId) {
+                return denyNetworkDecision(caseId, "error", "HTTP request reviewer returned an invalid decision");
+              }
+              if (reviewController.signal.aborted) {
+                return denyNetworkDecision(caseId, "timeout", "HTTP request review timed out");
+              }
+              if (reviewLifecycle.signal.aborted || settled) {
+                return denyNetworkDecision(caseId, "cancelled", "HTTP request review cancelled");
+              }
+              return outcome.response;
+            } finally {
+              clearTimeout(timeout);
+            }
+          });
+          decision = decision.then((resolved) => {
+            if (!settled && !reviewLifecycle.signal.aborted) {
+              notifyHttpDecision(options, resolved, summary);
+            }
+            return resolved;
+          });
+          decisionQueue = decision.then(() => undefined, () => undefined);
+          httpDecisions.set(key, decision);
+        }
+        void decision.then((resolved) => {
+          if (!settled && !reviewLifecycle.signal.aborted) {
+            sendWorker({
+              type: "http-response",
+              invocationNonce,
+              requestId,
+              allow: resolved.decision === "allow",
+            });
+          }
+        }).catch(() => {
+          if (!settled && !reviewLifecycle.signal.aborted) {
+            sendWorker({
+              type: "http-response",
+              invocationNonce,
+              requestId,
+              allow: false,
+            });
+          }
+        });
+        return;
+      }
       if (message.type === "result") {
         settle(undefined, { exitCode: message.exitCode ?? null });
         return;
@@ -328,6 +448,19 @@ export async function runReactiveSandbox(options: {
         allow: decision.decision === "allow",
       });
     };
+    const respondToHttpRequest = (
+      requestId: string,
+      decision: NetworkDecision,
+      request: HttpRequestSummary,
+    ) => {
+      notifyHttpDecision(options, decision, request);
+      sendWorker({
+        type: "http-response",
+        invocationNonce,
+        requestId,
+        allow: decision.decision === "allow",
+      });
+    };
     sendWorker({
       type: "start",
       invocationNonce,
@@ -335,8 +468,22 @@ export async function runReactiveSandbox(options: {
       command: options.command,
       cwd: options.cwd,
       settings,
+      ...(options.httpInspection ? { httpInspection: true } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     });
+  });
+}
+
+function abortedOutcome<K extends string>(
+  signal: AbortSignal,
+  kind: K,
+): Promise<{ kind: K }> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve({ kind });
+      return;
+    }
+    signal.addEventListener("abort", () => resolve({ kind }), { once: true });
   });
 }
 
@@ -418,6 +565,53 @@ function notifyNetworkDecision(
   } catch {
     // Diagnostics must never prevent a completed deny decision from reaching SRT.
   }
+}
+
+function notifyHttpDecision(
+  options: { onHttpDecision?: (decision: NetworkDecision, request: HttpRequestSummary) => void },
+  decision: NetworkDecision,
+  request: HttpRequestSummary,
+): void {
+  try {
+    options.onHttpDecision?.(decision, request);
+  } catch {
+    // Diagnostics must never prevent the completed decision from reaching SRT.
+  }
+}
+
+function isHttpRequestSummary(value: unknown): value is HttpRequestSummary {
+  if (!isRecord(value)) return false;
+  const stringArray = (item: unknown): item is string[] =>
+    Array.isArray(item) && item.length <= 128 && item.every((entry) => typeof entry === "string" && entry.length <= 256);
+  return (
+    typeof value.method === "string" && /^[A-Z]{1,20}$/.test(value.method) &&
+    typeof value.origin === "string" && value.origin.length <= 512 &&
+    typeof value.path === "string" && value.path.length <= 1_024 &&
+    stringArray(value.queryParameterNames) &&
+    stringArray(value.sensitiveQueryParameterNames) &&
+    stringArray(value.headerNames) &&
+    stringArray(value.sensitiveHeaderNames) &&
+    typeof value.bodyPresent === "boolean" &&
+    (value.contentType === undefined || (typeof value.contentType === "string" && value.contentType.length <= 128)) &&
+    (value.declaredContentLength === undefined || (Number.isSafeInteger(value.declaredContentLength) && Number(value.declaredContentLength) >= 0)) &&
+    (value.bodyObservedBytes === undefined || (Number.isSafeInteger(value.bodyObservedBytes) && Number(value.bodyObservedBytes) >= 0 && Number(value.bodyObservedBytes) <= 65_537)) &&
+    (value.bodyComplete === undefined || typeof value.bodyComplete === "boolean") &&
+    (value.bodySha256 === undefined || (typeof value.bodySha256 === "string" && /^[a-f0-9]{64}$/.test(value.bodySha256))) &&
+    (value.bodyRiskFlags === undefined || stringArray(value.bodyRiskFlags))
+  );
+}
+
+function fallbackHttpSummary(): HttpRequestSummary {
+  return {
+    method: "INVALID",
+    origin: "<invalid>",
+    path: "<invalid>",
+    queryParameterNames: [],
+    sensitiveQueryParameterNames: [],
+    headerNames: [],
+    sensitiveHeaderNames: [],
+    bodyPresent: false,
+  };
 }
 
 function diagnosticDestination(message: WorkerMessage): NetworkRequest {

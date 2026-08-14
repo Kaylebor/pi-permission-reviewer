@@ -103,6 +103,10 @@
 - Add regression tests for classifier precedence, capability binding, session
   and configuration invalidation, cancellation, worker cleanup, and every new
   reactive authorization path.
+- Keep HTTP inspection opt-in. Never send raw bodies, header/query values, or
+  opaque cache identities to reviewers; preserve the destination-first gate,
+  bounded body inspection, uncached incomplete bodies, and Boolean-only worker
+  decision boundary.
 - Assert that every permission block omits Pi's `terminate` flag. Hard turn
   termination is outside this extension's permission model; escalation through
   reviewers and the human is the authority path.

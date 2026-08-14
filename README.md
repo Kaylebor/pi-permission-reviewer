@@ -272,6 +272,22 @@ resumed winner also reuses the original evidence already in its local history
 instead of sending a duplicate copy; a newly reached reviewer receives the full
 bounded evidence packet.
 
+`reactiveReview.inspection` defaults to `"destination"`. The opt-in
+`"http-metadata"` mode additionally enables SRT's experimental TLS termination
+and request filter for HTTP(S) requests to destinations that this extension
+approved reactively. Configure it through `/permission-reviewer configure` or
+JSON:
+
+```json
+{
+  "reactiveReview": {
+    "reasoning": "one-lower",
+    "floor": "low",
+    "inspection": "http-metadata"
+  }
+}
+```
+
 ## Current routing policy
 
 - Known read-only commands skip model review but still run under the sandbox,
@@ -385,12 +401,12 @@ from locally supplied messages.
 
 Allowing the destination resumes the same process; the command is not rerun.
 The decision is bound to the exact Pi tool-call ID and cached only for that
-host-port pair for the lifetime of that command. An allow therefore authorizes
-any traffic the process sends over that destination channel; the extension
-cannot distinguish HTTP methods, paths, headers, bodies, credentials, or a
-changed DNS resolution. Reviewer and main-agent prompts state this explicitly
-so the decision is made at the actual available granularity. Explicit SRT deny
-rules remain
+host-port pair for the lifetime of that command. In the default `destination`
+mode, an allow therefore authorizes any traffic the process sends over that
+destination channel; the extension cannot distinguish HTTP methods, paths,
+headers, bodies, credentials, or a changed DNS resolution. Reviewer and
+main-agent prompts state this explicitly so the decision is made at the actual
+available granularity. Explicit SRT deny rules remain
 authoritative and never reach the reviewer. Headless operation denies off-list
 connections. Reviews are serialized, limited to eight distinct destinations per
 command, and cancelled after 30 seconds or when the command ends. Reactive
@@ -399,6 +415,30 @@ loopback, local/private literal addresses, metadata
 hosts, and other ports fail closed. DNS rebinding cannot be ruled out from
 SRT's hostname-only callback, so host approval should not be treated as content-
 or credential-aware authorization.
+
+The opt-in `http-metadata` mode adds a second pause before each parsed HTTP
+request to a reactively approved destination. The reviewer receives only the
+method, origin, a constrained route shape, categorized query/header names,
+content type/declared size, and bounded body characteristics.
+Header values, query values, and raw body bytes never leave the worker. Body
+inspection is capped at 64 KiB and 1.5 seconds; complete bodies contribute a
+SHA-256 digest and heuristic risk flags, while incomplete inspection is marked
+and never cached. Cache identity is an opaque command-local HMAC over exact URL,
+headers, and a complete body digest; it is used only by the transport and is
+not sent to the reviewer. Repeated identical requests can reuse a decision,
+while different values or request shapes require another review. Reviews remain
+serialized and are limited to 16 distinct request identities per command.
+Declared bodies on GET, HEAD, or OPTIONS are denied because SRT cannot expose
+those bytes to its Fetch-compatible request filter; use POST or PUT instead.
+
+This mode is experimental because it relies on SRT TLS termination. It can
+break certificate-pinned or mutual-TLS clients and rejects configurations with
+TLS-termination exclusions rather than silently creating an inspection gap.
+Statically allowlisted domains retain their configured policy and do not enter
+request review. Non-HTTP traffic, opaque proxy paths, response content, and DNS
+resolution are not inspected; the preceding host-port approval is still a
+meaningful channel grant, so request metadata is additional evidence rather
+than DLP or a complete egress boundary.
 
 The Pi bash `timeout` counts active sandboxed execution and pauses while a
 network permission decision is pending. Timeouts implemented by the command
@@ -413,7 +453,9 @@ Codex, and macOS Keychain paths. These are defense-in-depth controls, not a
 complete secret detector.
 
 The reactive network bridge covers only public-looking HTTPS destinations and
-is reviewer-assisted egress control, not HTTP-aware authorization or DLP.
+is reviewer-assisted egress control, not DLP. Optional HTTP metadata inspection
+improves request-level evidence for traffic SRT can parse, but does not remove
+the destination-level limitations above.
 Filesystem and Unix-socket access is preflight-only through the explicit Bash
 request above; there is no post-failure discovery or automatic replay. A curated
 and user-expandable catalogue of common host-port combinations is intentionally

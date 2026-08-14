@@ -60,6 +60,10 @@ Pi tool_call
        -> off-list public HTTPS: reactive review ladder
        -> structured NetworkDecision
        -> Boolean allow/deny IPC
+       -> optional TLS-terminated HTTP filter
+            -> sanitized request metadata + opaque command-local cache identity
+            -> reviewer/human request-shape decision
+            -> Boolean allow/deny IPC
        -> explicit or recognized Git preflight capability request
   -> read/write/edit: locked exact input -> Pi built-in executor
 ```
@@ -114,10 +118,26 @@ requires exactly version 0.1.8 and validates every private state/module shape it
 uses. Dependency upgrades therefore require an explicit adapter compatibility
 review rather than relying on semver for an unpublished internal API.
 
-The current reactive bridge covers public-looking HTTPS destinations on port
-443. It cannot inspect HTTP method, path, request body, or resolved DNS address,
-so each allow is deliberately evaluated as authority over the whole host-port
-channel for the rest of that command. Reviewer and agent prompts carry that
-limitation; it is not credential-aware authorization. Explicit filesystem and
-Unix-socket requests are preflight-only and separate from that live bridge;
-reactive local binding and curated known-host capabilities remain future work.
+The reactive bridge covers public-looking HTTPS destinations on port 443. Its
+default destination decision cannot inspect HTTP method, path, request body, or
+resolved DNS address, so each allow is deliberately evaluated as authority over
+the whole host-port channel for the rest of that command.
+
+Opt-in `reactiveReview.inspection: "http-metadata"` installs SRT's experimental
+TLS termination and request filter inside the per-command worker. Only traffic
+to a destination approved by the reactive callback enters this second review;
+static allowlist entries remain untouched. The worker sends a bounded summary
+without query/header values or raw body bytes. An opaque, randomly keyed HMAC
+distinguishes exact request values for command-local caching but never enters a
+reviewer prompt. Incomplete body inspection is uncached and fails into another
+review. The filter returns only a Boolean-equivalent SRT allow/deny action.
+Declared GET/HEAD/OPTIONS bodies are deterministically denied because SRT cannot
+expose those bytes to the Fetch-compatible callback.
+
+This does not inspect response content, opaque/non-HTTP traffic, or resolved DNS
+addresses, and TLS termination is incompatible with pinning and mTLS. The host
+approval therefore remains the broader channel authority; HTTP metadata is an
+additional enforcement point for requests SRT parses, not credential-aware DLP.
+Explicit filesystem and Unix-socket requests are preflight-only and separate
+from that live bridge; reactive local binding and curated known-host
+capabilities remain future work.

@@ -133,6 +133,7 @@ function showStatus(
   const reactiveReview = loaded.config.reactiveReview ?? {
     reasoning: "one-lower",
     floor: "low",
+    inspection: "destination",
   };
   const boundaryReview = loaded.config.boundaryReview ?? {
     publicKeyRead: "review",
@@ -147,7 +148,7 @@ function showStatus(
       `Policy: ${loaded.config.policy ?? "default reviewer policy"}`,
       `Guardian prompt: ${loaded.guardianPromptSource ?? "built-in"}`,
       `Context: ${reviewContext.mode}, ${reviewContext.conversationTokens} conversation tokens + ${reviewContext.toolTokens} tool tokens, ${reviewContext.persistence} persistence`,
-      `Reactive review: ${reactiveReview.reasoning}${reactiveReview.reasoning === "one-lower" ? ` (floor ${reactiveReview.floor})` : ""}`,
+      `Reactive review: ${reactiveReview.reasoning}${reactiveReview.reasoning === "one-lower" ? ` (floor ${reactiveReview.floor})` : ""}, ${reactiveReview.inspection}`,
       `Boundary review: public-key reads ${boundaryReview.publicKeyRead}, Git fsmonitor ${boundaryReview.gitFsmonitor ? "enabled" : "disabled"}, Git SSH agent ${boundaryReview.gitSshAgent}`,
       ...runtimeStatus,
     ].join("\n"),
@@ -225,11 +226,17 @@ async function configureReactiveReview(
     if (!selectedFloor) return;
     floor = selectedFloor as NonNullable<PermissionReviewerConfig["reactiveReview"]>["floor"];
   }
+  const inspection = await ctx.ui.select("Reactive network inspection", [
+    "destination — review only the requested host and port",
+    "http-metadata — experimentally review sanitized HTTP(S) request metadata",
+  ]);
+  if (!inspection) return;
   persist(ctx, options, {
     ...loaded.config,
     reactiveReview: {
       reasoning: reasoning.split(" ", 1)[0] as NonNullable<PermissionReviewerConfig["reactiveReview"]>["reasoning"],
       floor,
+      inspection: inspection.startsWith("http-metadata") ? "http-metadata" : "destination",
     },
   });
 }

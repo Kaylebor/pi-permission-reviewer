@@ -8,7 +8,8 @@
   },
   "reactiveReview": {
     "reasoning": "one-lower",
-    "floor": "low"
+    "floor": "low",
+    "inspection": "destination"
   },
   "boundaryReview": {
     "publicKeyRead": "review",

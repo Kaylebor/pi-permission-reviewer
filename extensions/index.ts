@@ -28,6 +28,7 @@ import {
 } from "../src/git-boundary.ts";
 import { ContextLedger, type ReviewContextEvidence } from "../src/context-ledger.ts";
 import { lockToolInput } from "../src/input-lock.ts";
+import type { HttpRequestSummary } from "../src/http-request.mjs";
 import { runReviewLevels } from "../src/levels.ts";
 import {
   isPublicNetworkDestination,
@@ -36,6 +37,7 @@ import {
 import { createPiPermAdapter } from "../src/pi-perm-adapter.ts";
 import {
   createReviewerTranscript,
+  invokeHttpReviewer,
   invokeModelReviewer,
   invokeNetworkReviewer,
   transcriptRetainsEvidence,
@@ -184,6 +186,29 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
               onNetworkDecision: (decision, destination) => {
                 if (decision.decision === "deny") {
                   const detail = `[permission-reviewer] denied ${destination.host}:${destination.port ?? "?"} (${decision.source}): ${decision.reason}\n`;
+                  options.onData(Buffer.from(detail));
+                  if (ctx.hasUI) ctx.ui.notify(detail.trim(), "warning");
+                }
+              },
+              httpInspection:
+                (loaded.config.reactiveReview ?? DEFAULT_REACTIVE_REVIEW).inspection === "http-metadata",
+              onHttpRequest: (request, reviewSignal) =>
+                reviewHttpRequest(
+                  capability,
+                  request,
+                  ctx,
+                  reviewSignal,
+                  configGeneration,
+                  loaded.config.reviewers,
+                  loaded.config.reactiveReview ?? DEFAULT_REACTIVE_REVIEW,
+                  caseEvidence.get(capability.reviewCase.id),
+                  loaded.config.reviewContext?.persistence ?? "command",
+                  reviewerTranscripts,
+                  reviewerQueues,
+                ),
+              onHttpDecision: (decision, request) => {
+                if (decision.decision === "deny") {
+                  const detail = `[permission-reviewer] denied ${request.method} ${request.origin}${request.path} (${decision.source}): ${decision.reason}\n`;
                   options.onData(Buffer.from(detail));
                   if (ctx.hasUI) ctx.ui.notify(detail.trim(), "warning");
                 }
@@ -908,6 +933,92 @@ async function reviewNetworkRequest(
     decision: allowed ? "allow" : "deny",
     source: "human",
     reason: allowed ? "destination approved by user" : "destination denied by user",
+    caseId,
+  };
+}
+
+async function reviewHttpRequest(
+  approved: ApprovalCapability,
+  request: HttpRequestSummary,
+  ctx: ExtensionContext,
+  signal: AbortSignal | undefined,
+  currentConfigGeneration: number,
+  reviewers: ReviewerConfig[],
+  reactiveReview: ReactiveReviewConfig,
+  evidence: ReviewContextEvidence | undefined,
+  persistence: "command" | "session",
+  transcripts: Map<string, ReviewerTranscript>,
+  queues: Map<string, Promise<void>>,
+): Promise<NetworkDecision> {
+  const caseId = approved.reviewCase.id;
+  const deny = (source: NetworkDecision["source"], reason: string): NetworkDecision =>
+    ({ decision: "deny", source, reason, caseId });
+  if (signal?.aborted) return deny("cancelled", "HTTP request review cancelled");
+  let reason = "The approved process requested this HTTP action";
+  if (approved.reviewCase.configGeneration !== currentConfigGeneration) {
+    reason = "Reviewer configuration changed after the command was approved";
+  } else if (approved.reviewer && approved.assessment) {
+    const ordered = orderReactiveReviewers(reviewers, approved.reviewer);
+    const resumedWinner = ordered[0];
+    const reviewed = await runReviewLevels({
+      reviewers: ordered,
+      minimumLevel: approved.reviewer.level,
+      invoke: (invocation) => invokeWithReviewerHistory({
+        caseId,
+        reviewer: invocation.reviewer,
+        persistence,
+        transcripts,
+        queues,
+        invoke: (transcript) => {
+          const resumesWinner = invocation.reviewer === resumedWinner;
+          return invokeHttpReviewer(
+            ctx.modelRegistry,
+            invocation.reviewer,
+            approved.request,
+            approved.assessment!,
+            request,
+            approved.reviewCase.policy,
+            signal,
+            {
+              ...(!resumesWinner || !transcriptRetainsEvidence(transcript, caseId)
+                ? { evidence }
+                : {}),
+              transcript,
+              caseId,
+              guardianPrompt: approved.reviewCase.guardianPrompt,
+              ...(resumesWinner
+                ? { reasoning: resolveReactiveReasoning(invocation.reviewer, reactiveReview) }
+                : {}),
+            },
+          );
+        },
+      }),
+    });
+    if (reviewed.decision === "allow") {
+      const winner = [...reviewed.attempts].reverse().find(
+        (attempt) => attempt.status === "decided" && attempt.assessment?.decision === "allow",
+      );
+      return {
+        decision: "allow",
+        source: "reviewer",
+        reason: reviewed.reason,
+        caseId,
+        ...(winner ? { reviewer: winner.model } : {}),
+      };
+    }
+    if (reviewed.decision === "deny") return deny("reviewer", reviewed.reason);
+    reason = reviewed.reason;
+  }
+  if (!ctx.hasUI || signal?.aborted) return deny("human", reason);
+  const allowed = await ctx.ui.confirm(
+    "HTTP request permission",
+    `${reason}\n\nCommand:\n${String(approved.request.input.command ?? "")}\n\nSanitized request metadata (no header/query values or raw body):\n${JSON.stringify(request, null, 2)}\n\nAllow this request shape for this command?`,
+    signal ? { signal } : undefined,
+  );
+  return {
+    decision: allowed ? "allow" : "deny",
+    source: "human",
+    reason: allowed ? "HTTP request shape approved by user" : "HTTP request denied by user",
     caseId,
   };
 }
