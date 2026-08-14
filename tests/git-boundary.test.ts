@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   applyGitBoundaryPlan,
   detectGitBoundary,
   gitBoundaryConflictsWithDeny,
 } from "../src/git-boundary.ts";
+import { testSshPublicKey } from "./fixtures/public-key.ts";
 
 test("recognizes direct Git built-ins and rejects boundary-changing syntax", async () => {
   assert.equal((await detectGitBoundary("git status", process.cwd()))?.builtin, "status");
@@ -46,6 +51,24 @@ test("explicit Unix-socket denies remain authoritative over Git overlays", () =>
   ), true);
 });
 
+test("specific public-key denies remain authoritative over Git signing", () => {
+  const publicKey = "/Users/test/.ssh/signing.pub";
+  assert.equal(gitBoundaryConflictsWithDeny(
+    { filesystem: { denyRead: [publicKey] } },
+    {
+      command: "git commit -S -m test",
+      argv: ["git", "commit", "-S", "-m", "test"],
+      builtin: "commit",
+      publicKeyRequest: {
+        kind: "public-key-read",
+        resource: publicKey,
+        phase: "preflight",
+        reason: "test",
+      },
+    },
+  ), true);
+});
+
 test("materializes platform-scoped Git capabilities without changing global config", () => {
   const plan = {
     command: "git status",
@@ -70,4 +93,48 @@ test("materializes platform-scoped Git capabilities without changing global conf
       SSH_AUTH_SOCK: "/tmp/ssh-agent.sock",
     },
   });
+});
+
+test("signed Git operations reuse the generic validated public-key capability", async () => {
+  const repository = mkdtempSync(join(tmpdir(), "git-public-key-"));
+  const key = join(repository, "signing.pub");
+  writeFileSync(key, testSshPublicKey(), { mode: 0o644 });
+  execFileSync("git", ["init", "-q", repository]);
+  for (const [name, value] of [
+    ["commit.gpgSign", "true"],
+    ["gpg.format", "ssh"],
+    ["user.signingKey", key],
+  ]) execFileSync("git", ["-C", repository, "config", name, value]);
+  const plan = await detectGitBoundary("git commit -m test", repository, {
+    environment: { SSH_AUTH_SOCK: "/tmp/agent.sock" },
+  });
+  assert.equal(plan?.publicKeyRequest?.kind, "public-key-read");
+  assert.equal(plan?.publicKeyRequest?.resource, key);
+  const applied = applyGitBoundaryPlan({}, plan!, { platform: "darwin", grantSshAgent: true });
+  assert.deepEqual(
+    (applied.settings.filesystem as { allowRead: string[] }).allowRead,
+    [key],
+  );
+  unlinkSync(key);
+  assert.throws(
+    () => applyGitBoundaryPlan({}, plan!, { platform: "darwin", grantSshAgent: true }),
+    /safely validate public key/,
+  );
+});
+
+test("signed Git operations reject configured private-key paths", async () => {
+  const repository = mkdtempSync(join(tmpdir(), "git-private-key-"));
+  const key = join(repository, "signing-key");
+  writeFileSync(key, "private material is never inspected\n", { mode: 0o600 });
+  execFileSync("git", ["init", "-q", repository]);
+  for (const [name, value] of [
+    ["commit.gpgSign", "true"],
+    ["gpg.format", "ssh"],
+    ["user.signingKey", key],
+  ]) execFileSync("git", ["-C", repository, "config", name, value]);
+  const plan = await detectGitBoundary("git commit -m test", repository, {
+    environment: { SSH_AUTH_SOCK: "/tmp/agent.sock" },
+  });
+  assert.match(plan?.publicKeyError ?? "", /public \.pub file/);
+  assert.equal(plan?.publicKeyRequest, undefined);
 });

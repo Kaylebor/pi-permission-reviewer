@@ -34,15 +34,19 @@ const HUMAN_ONLY = [
 
 const COMPLEX_SHELL = /(?:\|\||&&|[|<>;`]|\$\(|\$\{|\b(?:eval|exec|xargs)\b|\bfind\b[^\n]*-exec|\b(?:ba|z|fi)?sh\s+-c\b)/;
 
-export function classifyBash(command: string): CommandClassification {
+export function classifyBash(
+  command: string,
+  options: { publicKeyPaths?: readonly string[] } = {},
+): CommandClassification {
   const source = command.trim();
   const normalized = source.replace(/\s+/g, " ");
   if (!normalized) {
     return { action: "block", minimumLevel: 0, reason: "empty command" };
   }
   const shellDataflow = scanShellDataflow(source);
+  const sensitiveInput = maskExactPublicKeyPaths(normalized, options.publicKeyPaths ?? []);
   if (
-    HARD_BLOCK.some((pattern) => pattern.test(normalized)) ||
+    HARD_BLOCK.some((pattern) => pattern.test(sensitiveInput)) ||
     isRemoteShellPipeline(shellDataflow.pipelineGroups)
   ) {
     return {
@@ -77,6 +81,18 @@ export function classifyBash(command: string): CommandClassification {
     minimumLevel: 0,
     reason: "no proactive rule matched; sandbox boundary remains authoritative",
   };
+}
+
+function maskExactPublicKeyPaths(command: string, paths: readonly string[]): string {
+  let masked = command;
+  for (const path of [...new Set(paths)].sort((a, b) => b.length - a.length)) {
+    const escaped = path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    masked = masked.replace(
+      new RegExp(`(^|[\\s'\"=])${escaped}(?=$|[\\s'\";|&<>])`, "g"),
+      "$1[VALIDATED_PUBLIC_KEY]",
+    );
+  }
+  return masked;
 }
 
 function maskQuotedDataflowOperators(command: string): string {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import permissionReviewer, {
   isEligibleReactiveDestination,
   resolveReactiveReasoning,
 } from "../extensions/index.ts";
+import { testSshPublicKey } from "./fixtures/public-key.ts";
 
 function builtinTool(name: string) {
   return [{ name, sourceInfo: { source: "builtin" } }];
@@ -41,6 +42,10 @@ test("registered bash schema exposes strict structured permission requests", asy
   assert.equal(Value.Check(registered.parameters as any, {
     command: "cat /outside/input",
     permissions: { read: ["/outside/input"] },
+  }), true);
+  assert.equal(Value.Check(registered.parameters as any, {
+    command: "ssh-keygen -lf /outside/signing.pub",
+    permissions: { publicKeyRead: ["/outside/signing.pub"] },
   }), true);
   assert.equal(Value.Check(registered.parameters as any, {
     command: "cat /outside/input",
@@ -102,6 +107,50 @@ test("an explicit read request forces level-zero review and stays in the bound i
   assert.equal(payload.request.minimumLevel, 0);
   assert.deepEqual(payload.request.input.permissions, { read: ["/outside/input"] });
   assert.throws(() => event.input.permissions.read.push("/outside/other"), TypeError);
+});
+
+test("a validated public-key capability can review an exact read beneath .ssh", async () => {
+  const runtime = mkdtempSync(join(tmpdir(), "pi-permission-reviewer-runtime-"));
+  process.env.PI_PERMISSION_REVIEWER_RUNTIME_DIR = runtime;
+  const piPermConfig = join(runtime, "pi-perm.toml");
+  writeFileSync(piPermConfig, '[tools.bash]\nsrtBinary = "true"\n');
+  process.env.PI_PERM_USER_CONFIG = piPermConfig;
+  const reviewerConfig = join(runtime, "reviewers.json");
+  writeFileSync(reviewerConfig, JSON.stringify({
+    reviewers: [{ level: 0, model: "test/reviewer" }],
+    boundaryReview: { publicKeyRead: "review" },
+  }));
+  process.env.PI_PERMISSION_REVIEWER_CONFIG = reviewerConfig;
+  const sshDirectory = join(runtime, ".ssh");
+  const publicKey = join(sshDirectory, "personal.pub");
+  mkdirSync(sshDirectory);
+  writeFileSync(publicKey, testSshPublicKey(), { mode: 0o644 });
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  await permissionReviewer({
+    events: { emit() {} }, registerTool() {}, registerCommand() {},
+    on(name: string, handler: (...args: any[]) => unknown) { handlers.set(name, handler); },
+  } as any);
+  let reviewed = false;
+  const result = await handlers.get("tool_call")!({
+    toolName: "bash",
+    toolCallId: "public-key-read",
+    input: {
+      command: `ssh-keygen -lf ${publicKey}`,
+      permissions: { publicKeyRead: [publicKey] },
+    },
+  }, {
+    cwd: process.cwd(), hasUI: false, ui: {},
+    modelRegistry: {
+      find: () => ({ provider: "test", id: "reviewer" }),
+      hasConfiguredAuth: () => true,
+      complete: async () => {
+        reviewed = true;
+        return { stopReason: "stop", content: [{ type: "text", text: '{"decision":"allow","reason":"validated public key"}' }] };
+      },
+    },
+  });
+  assert.equal(result, undefined);
+  assert.equal(reviewed, true);
 });
 
 test("reactive continuation lowers only above the configured floor", () => {

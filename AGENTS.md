@@ -28,15 +28,22 @@
   outside this package's execution boundary once its outer call is allowed.
   New integrations should route effects through Pi's guarded tools or an
   equivalent capability-bound sandbox broker.
-- Contained Sandbox Runtime execution is the default. `boundaryReview` enables
-  recognized Git preflight compatibility; deterministic pi-perm, classifier,
-  and SRT denies always take precedence. Linux SSH-agent approval necessarily
-  enables Unix sockets broadly for that exact invocation.
+- Contained Sandbox Runtime execution is the default. `boundaryReview` controls
+  the generic public-key-read capability and recognized Git preflight
+  compatibility. The only exception to the built-in blanket `~/.ssh` read deny
+  is an exact, deterministically validated `public-key-read`; more-specific
+  denies and `boundaryReview.publicKeyRead: "block"` remain authoritative.
+  Linux SSH-agent approval necessarily enables Unix sockets broadly
+  for that exact invocation.
+- `boundaryReview.publicKeyRead` either routes an explicit public-key read
+  request through review or blocks it. It must never become a general filesystem
+  read allowance.
 - Git fsmonitor uses an invocation-local compatibility overlay, while approved
   Git SSH access has a one-run broad Unix-socket tradeoff. Local binding is
   unsupported everywhere.
-- The Bash schema exposes explicit `permissions.read`, `permissions.write`,
-  `permissions.unixSockets`, and `permissions.sshAgent` preflight requests.
+- The Bash schema exposes explicit `permissions.read`,
+  `permissions.publicKeyRead`, `permissions.write`, `permissions.unixSockets`,
+  and `permissions.sshAgent` preflight requests.
   Keep them exact-input-bound, one-use, capped, and subordinate to deterministic
   denies. Never infer them from failed-command text or retry a failed command.
 - SRT 0.0.71 grants bind and connect together for an exact macOS Unix-socket

@@ -1,9 +1,11 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, normalize } from "node:path";
 import type { BoundaryRequest } from "./review-types.ts";
+import { validatePublicKeyFile } from "./public-key-boundary.ts";
 
 export interface BashPermissionRequest {
   read?: readonly string[];
+  publicKeyRead?: readonly string[];
   write?: readonly string[];
   unixSockets?: readonly string[];
   sshAgent?: boolean;
@@ -27,27 +29,29 @@ export function planExplicitBoundaries(
   if (value === undefined) return;
   if (!isRecord(value)) throw new Error("permissions must be an object");
   for (const key of Object.keys(value)) {
-    if (!new Set(["read", "write", "unixSockets", "sshAgent"]).has(key)) {
+    if (!new Set(["read", "publicKeyRead", "write", "unixSockets", "sshAgent"]).has(key)) {
       throw new Error(`unsupported permission field: ${key}`);
     }
   }
   const read = exactPaths(value.read, "permissions.read");
+  const publicKeyRead = exactPaths(value.publicKeyRead, "permissions.publicKeyRead");
   const write = exactPaths(value.write, "permissions.write");
   const unixSockets = exactPaths(value.unixSockets, "permissions.unixSockets");
   if (value.sshAgent !== undefined && typeof value.sshAgent !== "boolean") {
     throw new Error("permissions.sshAgent must be a boolean");
   }
   const sshAgent = value.sshAgent === true;
-  if (read.length + write.length + unixSockets.length === 0 && !sshAgent) {
+  if (read.length + publicKeyRead.length + write.length + unixSockets.length === 0 && !sshAgent) {
     throw new Error("permissions must request at least one capability");
   }
-  if (JSON.stringify({ read, write, unixSockets, sshAgent }).length > MAX_PERMISSION_REQUEST_LENGTH) {
+  if (JSON.stringify({ read, publicKeyRead, write, unixSockets, sshAgent }).length > MAX_PERMISSION_REQUEST_LENGTH) {
     throw new Error(`permissions request must be at most ${MAX_PERMISSION_REQUEST_LENGTH} characters`);
   }
   const platform = options.platform ?? process.platform;
   const environment = options.environment ?? process.env;
   const boundaries: BoundaryRequest[] = [
     ...read.map((resource) => boundary("filesystem-read", resource, "Read access was explicitly requested", platform)),
+    ...publicKeyRead.map((resource) => boundary("public-key-read", resource, "Validated SSH public-key read access was requested", platform)),
     ...write.map((resource) => boundary("filesystem-write", resource, "Write access was explicitly requested", platform)),
     ...unixSockets.map((resource) => boundary(
       "unix-socket",
@@ -75,6 +79,7 @@ export function planExplicitBoundaries(
   return Object.freeze({
     permissions: Object.freeze({
       ...(read.length ? { read: Object.freeze(read) } : {}),
+      ...(publicKeyRead.length ? { publicKeyRead: Object.freeze(publicKeyRead) } : {}),
       ...(write.length ? { write: Object.freeze(write) } : {}),
       ...(unixSockets.length ? { unixSockets: Object.freeze(unixSockets) } : {}),
       ...(sshAgent ? { sshAgent: true } : {}),
@@ -96,10 +101,15 @@ export function materializeExplicitBoundaries(
   const network = record(next.network);
   const environment: Record<string, string> = {};
   for (const boundary of plan.boundaries) {
-    if (boundaryConflictsWithDeny(settings, boundary, options.cwd)) {
+    if (boundary.kind === "public-key-read") {
+      validatePublicKeyFile(boundary.resource);
+      if (publicKeyConflictsWithDeny(settings, boundary.resource, options.cwd)) {
+        throw new Error(`requested ${boundary.kind} conflicts with an explicit sandbox deny: ${boundary.resource}`);
+      }
+    } else if (boundaryConflictsWithDeny(settings, boundary, options.cwd)) {
       throw new Error(`requested ${boundary.kind} conflicts with an explicit sandbox deny: ${boundary.resource}`);
     }
-    if (boundary.kind === "filesystem-read") {
+    if (boundary.kind === "filesystem-read" || boundary.kind === "public-key-read") {
       filesystem.allowRead = append(filesystem.allowRead, boundary.resource);
     } else if (boundary.kind === "filesystem-write") {
       filesystem.allowWrite = append(filesystem.allowWrite, boundary.resource);
@@ -127,6 +137,9 @@ export function boundaryConflictsWithDeny(
   if (boundary.kind === "filesystem-read") {
     return pathDeniedBy(boundary.resource, filesystem.denyRead, cwd);
   }
+  if (boundary.kind === "public-key-read") {
+    return publicKeyConflictsWithDeny(settings, boundary.resource, cwd);
+  }
   if (boundary.kind === "filesystem-write") {
     return pathDeniedBy(boundary.resource, filesystem.denyWrite, cwd);
   }
@@ -138,6 +151,21 @@ export function boundaryConflictsWithDeny(
     return pathDeniedBy(boundary.resource, denied, cwd);
   }
   return true;
+}
+
+/** Ignore only the package's built-in blanket ~/.ssh deny after validation. */
+export function publicKeyConflictsWithDeny(
+  settings: Readonly<Record<string, unknown>>,
+  resource: string,
+  cwd = process.cwd(),
+): boolean {
+  const filesystem = record(settings.filesystem);
+  const home = homedir().replaceAll("\\", "/").replace(/\/$/, "");
+  const configured = Array.isArray(filesystem.denyRead)
+    ? filesystem.denyRead.filter((item): item is string =>
+      typeof item === "string" && item !== "~/.ssh" && item !== `${home}/.ssh`)
+    : [];
+  return pathDeniedBy(resource, configured, cwd);
 }
 
 function exactPaths(value: unknown, label: string): string[] {

@@ -2,6 +2,8 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import type { BoundaryRequest } from "./review-types.ts";
+import { validatePublicKeyFile } from "./public-key-boundary.ts";
+import { publicKeyConflictsWithDeny } from "./explicit-boundary.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,6 +34,8 @@ export interface GitBoundaryPlan {
   fsmonitorSocket?: string;
   sshAgentRequest?: Readonly<BoundaryRequest>;
   sshAuthSock?: string;
+  publicKeyRequest?: Readonly<BoundaryRequest>;
+  publicKeyError?: string;
 }
 
 export async function detectGitBoundary(
@@ -77,6 +81,30 @@ export async function detectGitBoundary(
     (signedByArgument || signedByConfig) &&
     (await gitOutput(gitBinary, cwd, ["config", "--get", "gpg.format"])) === "ssh" &&
     !await gitOutput(gitBinary, cwd, ["config", "--get", "gpg.ssh.program"]);
+  if (signedWithSsh) {
+    const configuredKey = await gitOutput(gitBinary, cwd, ["config", "--get", "user.signingKey"]);
+    if (configuredKey && !isInlinePublicKey(configuredKey)) {
+      const publicKeyPath = await gitOutput(gitBinary, cwd, [
+        "config", "--path", "--get", "user.signingKey",
+      ]);
+      if (!publicKeyPath?.endsWith(".pub") || !isAbsolute(publicKeyPath)) {
+        plan.publicKeyError = "SSH signing requires user.signingKey to name a public .pub file or a key:: public key; private-key paths remain sandbox-denied";
+      } else {
+        try {
+          validatePublicKeyFile(publicKeyPath);
+          plan.publicKeyRequest = Object.freeze({
+            kind: "public-key-read",
+            resource: publicKeyPath,
+            phase: "preflight",
+            reason: `Git ${builtin} requested its configured validated SSH public key`,
+            platform: process.platform,
+          });
+        } catch (error) {
+          plan.publicKeyError = `Configured SSH signing public key is unsafe or invalid: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+    }
+  }
   if (sshAuthSock && isAbsolute(sshAuthSock) &&
       (remoteUsesSsh || signedWithSsh)) {
     plan.sshAuthSock = sshAuthSock;
@@ -142,6 +170,7 @@ export function applyGitBoundaryPlan(
     platform?: NodeJS.Platform;
     enableFsmonitor?: boolean;
     grantSshAgent?: boolean;
+    cwd?: string;
   } = {},
 ): { settings: Record<string, unknown>; environment: Record<string, string> } {
   const platform = options.platform ?? process.platform;
@@ -158,7 +187,20 @@ export function applyGitBoundaryPlan(
     if (platform === "darwin") addUnique(network, "allowUnixSockets", plan.sshAuthSock);
     else if (platform === "linux") network.allowAllUnixSockets = true;
   }
+  if (plan.publicKeyRequest) {
+    validatePublicKeyFile(plan.publicKeyRequest.resource);
+    if (publicKeyConflictsWithDeny(settings, plan.publicKeyRequest.resource, options.cwd)) {
+      throw new Error("validated public-key read conflicts with a specific sandbox deny");
+    }
+    const filesystem = record(next.filesystem);
+    next.filesystem = filesystem;
+    addUnique(filesystem, "allowRead", plan.publicKeyRequest.resource);
+  }
   return { settings: next, environment };
+}
+
+function isInlinePublicKey(value: string): boolean {
+  return value.startsWith("key::") || /^(?:ssh-|ecdsa-|sk-)/.test(value);
 }
 
 export function gitBoundaryConflictsWithDeny(
@@ -171,6 +213,10 @@ export function gitBoundaryConflictsWithDeny(
     cwd?: string;
   } = {},
 ): boolean {
+  if (
+    plan.publicKeyRequest &&
+    publicKeyConflictsWithDeny(settings, plan.publicKeyRequest.resource, options.cwd)
+  ) return true;
   const network = record(settings.network);
   const denied = Array.isArray(network.denyUnixSockets)
     ? network.denyUnixSockets.filter((item): item is string => typeof item === "string")

@@ -31,6 +31,7 @@ export const DEFAULT_REACTIVE_REVIEW = {
   floor: "low",
 } as const;
 export const DEFAULT_BOUNDARY_REVIEW = {
+  publicKeyRead: "review",
   gitFsmonitor: true,
   gitSshAgent: "review",
 } as const;
@@ -128,15 +129,19 @@ export function validateConfig(value: unknown): PermissionReviewerConfig {
 function validateBoundaryReview(value: unknown): NonNullable<PermissionReviewerConfig["boundaryReview"]> {
   if (value === undefined) return { ...DEFAULT_BOUNDARY_REVIEW };
   if (!isRecord(value)) throw new Error("boundaryReview must be an object");
+  const publicKeyRead = value.publicKeyRead ?? DEFAULT_BOUNDARY_REVIEW.publicKeyRead;
   const gitFsmonitor = value.gitFsmonitor ?? DEFAULT_BOUNDARY_REVIEW.gitFsmonitor;
   const gitSshAgent = value.gitSshAgent ?? DEFAULT_BOUNDARY_REVIEW.gitSshAgent;
+  if (publicKeyRead !== "review" && publicKeyRead !== "block") {
+    throw new Error("boundaryReview.publicKeyRead must be review or block");
+  }
   if (typeof gitFsmonitor !== "boolean") {
     throw new Error("boundaryReview.gitFsmonitor must be a boolean");
   }
   if (gitSshAgent !== "review" && gitSshAgent !== "block") {
     throw new Error("boundaryReview.gitSshAgent must be review or block");
   }
-  return { gitFsmonitor, gitSshAgent };
+  return { publicKeyRead, gitFsmonitor, gitSshAgent };
 }
 
 function validateReactiveReview(value: unknown): NonNullable<PermissionReviewerConfig["reactiveReview"]> {

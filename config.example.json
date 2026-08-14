@@ -11,6 +11,7 @@
     "floor": "low"
   },
   "boundaryReview": {
+    "publicKeyRead": "review",
     "gitFsmonitor": true,
     "gitSshAgent": "review"
   },

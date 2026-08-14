@@ -154,18 +154,24 @@ providers, custom `models.json` providers, and extension-registered providers
 are treated alike. A manually entered model may be unavailable now and become
 usable later after its provider is authenticated.
 
-`boundaryReview` controls two narrow Git preflight compatibility requests. All
-fields are optional when editing JSON; omitted fields use these safe defaults:
+`boundaryReview` controls a narrow public-key-read capability and two Git
+preflight compatibility requests. All fields are optional when editing JSON;
+omitted fields use these safe defaults:
 
 ```json
 {
   "boundaryReview": {
+    "publicKeyRead": "review",
     "gitFsmonitor": true,
     "gitSshAgent": "review"
   }
 }
 ```
 
+- `publicKeyRead` is either `"review"` (the default) or `"block"`. `review`
+  routes an explicit public-key-read capability request through the reviewer
+  chain; `block` denies it deterministically. It does not permit arbitrary
+  filesystem reads.
 - `gitFsmonitor` enables Git fsmonitor compatibility. macOS adds only the
   repository's resolved socket path; Linux disables fsmonitor through an
   invocation-local Git config overlay. It never changes user Git config.
@@ -283,6 +289,7 @@ The registered `bash` tool accepts an optional structured permission request:
   "command": "tool --input /outside/input --output /outside/result",
   "permissions": {
     "read": ["/outside/input"],
+    "publicKeyRead": ["/home/alice/.ssh/signing.pub"],
     "write": ["/outside/result"],
     "unixSockets": ["/run/example.sock"],
     "sshAgent": true
@@ -292,12 +299,17 @@ The registered `bash` tool accepts an optional structured permission request:
 
 Each path must be normalized, absolute, glob-free, no list may contain more
 than 16 paths, and the complete permission object is capped at 4,096
-characters. A request is shown in full before any possibly truncated command
-input in the human prompt, and is bound into the one-use capability. Read-only
+characters. `publicKeyRead` is the sole semantic exception to the blanket
+`~/.ssh` read deny: each exact `.pub` path must be a small, regular,
+non-symlink, owner-controlled, non-writable SSH public-key file. A more-specific
+configured deny for that file remains authoritative, and the file is
+revalidated immediately before execution. A request is shown in full before
+any possibly truncated command input in the human prompt, and is bound into the
+one-use capability. Read-only
 requests enter at level 0; write, Unix-socket, and SSH-agent requests enter at
-level 1. `pi-perm`, classifier, and hardened SRT
-denies remain authoritative, so a reviewer cannot re-allow an explicitly denied
-path or socket.
+level 1. Apart from the validated public-key exception above, `pi-perm`,
+classifier, and hardened SRT denies remain authoritative, so a reviewer cannot
+re-allow an explicitly denied path or socket.
 
 The default remains contained execution with no extra access. If a contained
 attempt fails, the agent may resubmit the unchanged command with the minimum
@@ -319,9 +331,16 @@ Git operations may request only the configured preflight compatibility paths:
 `gitFsmonitor` provides the platform-specific fsmonitor handling without
 changing user Git configuration, and `gitSshAgent` either blocks or routes a
 Git SSH-agent request through the reviewer chain. Local binding remains blocked.
-Git detection is a convenience layer over the same frozen per-invocation
-boundary. Other commands use the explicit `permissions` object above rather
-than reusing Git-specific controls.
+For SSH-signed commits and tags, Git detection also derives the same generic
+`public-key-read` capability from `user.signingKey`; it never grants a private
+key path. Git detection is a convenience producer over the same frozen
+per-invocation boundary. Other commands request that generic capability through
+the explicit `permissions` object rather than reusing Git-specific controls.
+
+`publicKeyRead` controls the generic public-key-read capability separately from
+Git detection. Its `review` mode routes an explicit request through the
+reviewer chain; `block` is authoritative. It remains a scoped preflight
+capability, not a general filesystem-read exception.
 
 ## Reactive network review
 

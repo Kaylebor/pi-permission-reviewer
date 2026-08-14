@@ -31,6 +31,8 @@ export interface ReactiveReviewConfig {
 }
 
 export interface BoundaryReviewConfig {
+  /** How an explicit public-key read request is handled. */
+  publicKeyRead: "review" | "block";
   /** Enable invocation-local Git fsmonitor compatibility. */
   gitFsmonitor: boolean;
   /** How a reviewable request for Git's SSH agent is handled. */

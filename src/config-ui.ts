@@ -126,6 +126,7 @@ function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void 
     floor: "low",
   };
   const boundaryReview = loaded.config.boundaryReview ?? {
+    publicKeyRead: "review",
     gitFsmonitor: true,
     gitSshAgent: "review",
   };
@@ -138,7 +139,7 @@ function showStatus(ctx: Pick<ConfigContext, "ui">, loaded: LoadedConfig): void 
       `Guardian prompt: ${loaded.guardianPromptSource ?? "built-in"}`,
       `Context: ${reviewContext.mode}, ${reviewContext.conversationTokens} conversation tokens + ${reviewContext.toolTokens} tool tokens, ${reviewContext.persistence} persistence`,
       `Reactive review: ${reactiveReview.reasoning}${reactiveReview.reasoning === "one-lower" ? ` (floor ${reactiveReview.floor})` : ""}`,
-      `Boundary review: Git fsmonitor ${boundaryReview.gitFsmonitor ? "enabled" : "disabled"}, Git SSH agent ${boundaryReview.gitSshAgent}`,
+      `Boundary review: public-key reads ${boundaryReview.publicKeyRead}, Git fsmonitor ${boundaryReview.gitFsmonitor ? "enabled" : "disabled"}, Git SSH agent ${boundaryReview.gitSshAgent}`,
     ].join("\n"),
     loaded.valid ? "info" : "error",
   );
@@ -150,9 +151,15 @@ async function configureBoundaryReview(
 ): Promise<void> {
   const loaded = options.getLoaded();
   const current = loaded.config.boundaryReview ?? {
+    publicKeyRead: "review" as const,
     gitFsmonitor: true,
     gitSshAgent: "review" as const,
   };
+  const publicKeyRead = await ctx.ui.select("Public-key read boundary", [
+    "review — send an explicit public-key read request to the reviewer chain",
+    "block — deny public-key read access deterministically",
+  ]);
+  if (!publicKeyRead) return;
   const gitFsmonitor = await ctx.ui.select("Git fsmonitor boundary", [
     "enabled — exact macOS socket or invocation-local Linux disable",
     "disabled — do not add Git fsmonitor compatibility",
@@ -167,6 +174,7 @@ async function configureBoundaryReview(
     ...loaded.config,
     boundaryReview: {
       ...current,
+      publicKeyRead: publicKeyRead.startsWith("review") ? "review" : "block",
       gitFsmonitor: gitFsmonitor.startsWith("enabled"),
       gitSshAgent: gitSshAgent.startsWith("review") ? "review" : "block",
     },

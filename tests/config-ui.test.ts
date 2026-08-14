@@ -172,6 +172,7 @@ test("configure UI exposes boundary review controls and status", async () => {
   let loaded = loadConfig(path);
   const selections = [
     "Configure boundary review",
+    "block — deny public-key read access deterministically",
     "enabled — allow the reviewable Git fsmonitor boundary path",
     "block — deny Git SSH agent access deterministically",
   ];
@@ -197,6 +198,7 @@ test("configure UI exposes boundary review controls and status", async () => {
       },
     );
     assert.deepEqual(loaded.config.boundaryReview, {
+      publicKeyRead: "block",
       gitFsmonitor: true,
       gitSshAgent: "block",
     });
@@ -210,7 +212,7 @@ test("configure UI exposes boundary review controls and status", async () => {
       } as any,
       { getLoaded: () => loaded, setLoaded() {} },
     );
-    assert.match(notices.at(-1) ?? "", /Boundary review: Git fsmonitor enabled, Git SSH agent block/);
+    assert.match(notices.at(-1) ?? "", /Boundary review: public-key reads block, Git fsmonitor enabled, Git SSH agent block/);
   } finally {
     if (previous === undefined) delete process.env.PI_PERMISSION_REVIEWER_CONFIG;
     else process.env.PI_PERMISSION_REVIEWER_CONFIG = previous;

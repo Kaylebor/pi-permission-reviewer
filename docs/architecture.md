@@ -9,10 +9,12 @@ executor without consuming a capability bound to its exact input, CWD, session
 epoch, configuration generation, and frozen sandbox settings.
 
 Contained execution is the default: each authorized command uses frozen SRT
-settings. A Bash call may include exact structured filesystem, Unix-socket, or
-SSH-agent preflight requests, and recognized Git commands may derive narrowly
-scoped compatibility requests. Deterministic `pi-perm`, classifier, and SRT
-denies remain authoritative; neither path can override a deterministic denial.
+settings. A Bash call may include exact structured filesystem, validated
+public-key, Unix-socket, or SSH-agent preflight requests, and recognized Git
+commands may derive narrowly scoped compatibility requests. Deterministic
+`pi-perm`, classifier, and SRT denies remain authoritative except for the
+documented exact validated public-key exception to the built-in blanket
+`~/.ssh` deny; a more-specific configured deny still wins.
 
 The review plane owns provider-neutral context evidence and tool-less model
 calls. A `ContextLedger` follows Pi's `context` snapshots and finalized
@@ -74,8 +76,13 @@ present in that local history and is not duplicated. Availability fallbacks and
 higher-level escalation reviewers keep their configured effort and receive the
 full evidence packet when they have not seen the case.
 
-`boundaryReview` defaults to `{ gitFsmonitor: true, gitSshAgent: "review" }`.
-Recognized Git commands can receive platform-specific fsmonitor compatibility;
+`boundaryReview` defaults to `{ publicKeyRead: "review", gitFsmonitor: true,
+gitSshAgent: "review" }`. `publicKeyRead: "review"` routes an explicit
+public-key-read capability request through the reviewer chain, while `"block"`
+is authoritative. The capability validates an exact owner-controlled SSH
+`.pub` file and revalidates it before execution; it does not permit arbitrary
+filesystem reads. Recognized Git
+commands can receive platform-specific fsmonitor compatibility;
 on Linux it is an invocation-local `core.fsmonitor=false` overlay. An approved
 SSH-agent Git operation starts at level 1 and receives Linux's broad Unix-socket
 switch only for that exact run. This disables AF_UNIX isolation and can expose

@@ -38,6 +38,7 @@ export interface ReviewCase {
 export type BoundaryKind =
   | "network-destination"
   | "filesystem-read"
+  | "public-key-read"
   | "filesystem-write"
   | "unix-socket"
   | "ssh-agent";

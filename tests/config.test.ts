@@ -33,6 +33,7 @@ test("accepts tied and sparse reviewer levels", () => {
     floor: "low",
   });
   assert.deepEqual(config.boundaryReview, {
+    publicKeyRead: "review",
     gitFsmonitor: true,
     gitSshAgent: "review",
   });
@@ -41,12 +42,17 @@ test("accepts tied and sparse reviewer levels", () => {
 test("validates boundary review settings and fills their safe defaults", () => {
   const config = validateConfig({
     reviewers: [],
-    boundaryReview: { gitSshAgent: "block" },
+    boundaryReview: { publicKeyRead: "block", gitSshAgent: "block" },
   });
   assert.deepEqual(config.boundaryReview, {
+    publicKeyRead: "block",
     gitFsmonitor: true,
     gitSshAgent: "block",
   });
+  assert.throws(
+    () => validateConfig({ reviewers: [], boundaryReview: { publicKeyRead: "allow" } }),
+    /boundaryReview\.publicKeyRead must be review or block/,
+  );
   assert.throws(
     () => validateConfig({ reviewers: [], boundaryReview: { gitFsmonitor: 1 } }),
     /boundaryReview\.gitFsmonitor must be a boolean/,

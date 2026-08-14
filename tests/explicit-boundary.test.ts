@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   boundaryConflictsWithDeny,
   materializeExplicitBoundaries,
   planExplicitBoundaries,
+  publicKeyConflictsWithDeny,
 } from "../src/explicit-boundary.ts";
+import { testSshPublicKey } from "./fixtures/public-key.ts";
 
 test("plans exact explicit access with review levels matching consequence", () => {
   const read = planExplicitBoundaries({ read: ["/repo/README.md"] }, { platform: "darwin" });
@@ -105,6 +110,34 @@ test("materializes only reviewed capabilities and preserves deterministic denies
     ),
     /explicit sandbox deny/,
   );
+});
+
+test("validated public-key reads override only the built-in SSH blanket deny", () => {
+  const directory = mkdtempSync(join(tmpdir(), "explicit-public-key-"));
+  const publicKey = join(directory, "signing.pub");
+  writeFileSync(publicKey, testSshPublicKey(), { mode: 0o644 });
+  const plan = planExplicitBoundaries({ publicKeyRead: [publicKey] })!;
+  const result = materializeExplicitBoundaries({}, plan);
+  assert.deepEqual(
+    (result.settings.filesystem as { allowRead: string[] }).allowRead,
+    [publicKey],
+  );
+  assert.throws(
+    () => materializeExplicitBoundaries(
+      { filesystem: { denyRead: [publicKey] } },
+      plan,
+    ),
+    /explicit sandbox deny/,
+  );
+  const protectedPublicKey = join(homedir(), ".ssh", "personal.pub");
+  assert.equal(publicKeyConflictsWithDeny(
+    { filesystem: { denyRead: ["~/.ssh"] } },
+    protectedPublicKey,
+  ), false);
+  assert.equal(publicKeyConflictsWithDeny(
+    { filesystem: { denyRead: [protectedPublicKey] } },
+    protectedPublicKey,
+  ), true);
 });
 
 test("Linux socket grants remain one-invocation broad and fail closed over socket denies", () => {

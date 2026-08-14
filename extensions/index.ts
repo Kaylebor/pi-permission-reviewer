@@ -54,9 +54,11 @@ import {
   materializeExplicitBoundaries,
   planExplicitBoundaries,
 } from "../src/explicit-boundary.ts";
+import { validatePublicKeyFile } from "../src/public-key-boundary.ts";
 
 const bashPermissionSchema = Type.Optional(Type.Object({
   read: Type.Optional(Type.Array(Type.String({ description: "Normalized absolute path" }), { maxItems: 16 })),
+  publicKeyRead: Type.Optional(Type.Array(Type.String({ description: "Normalized absolute path to a validated SSH public-key file" }), { maxItems: 16 })),
   write: Type.Optional(Type.Array(Type.String({ description: "Normalized absolute path" }), { maxItems: 16 })),
   unixSockets: Type.Optional(Type.Array(Type.String({ description: "Normalized absolute socket path; grants all Unix sockets on Linux" }), { maxItems: 16 })),
   sshAgent: Type.Optional(Type.Unsafe<boolean>({
@@ -111,7 +113,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     promptGuidelines: [
       ...(bashTool.promptGuidelines ?? []),
       "Network connections may pause for permission review. Avoid short application-level wall-clock timeouts (for example curl --max-time), or leave those application-level deadlines enough review headroom when redirects or new hosts are possible.",
-      "Use bash permissions.read, permissions.write, permissions.unixSockets, or permissions.sshAgent when a contained command needs additional filesystem or Unix-socket access. Resubmit the exact command, use normalized absolute paths, and request only the minimum necessary access. Linux Unix-socket and SSH-agent requests grant all Unix sockets for that one invocation.",
+      "Use bash permissions.read, permissions.publicKeyRead, permissions.write, permissions.unixSockets, or permissions.sshAgent when a contained command needs additional access. publicKeyRead accepts only a validated owner-controlled SSH .pub file and enters permission review even beneath a protected directory. Resubmit the exact command, use normalized absolute paths, and request only the minimum necessary access. Linux Unix-socket and SSH-agent requests grant all Unix sockets for that one invocation.",
     ],
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
       if (activeSandboxWorkers >= 4) {
@@ -129,6 +131,11 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         throw new Error(`bash execution lacks a valid one-use approval capability (${consumed.reason})`);
       }
       const capability = consumed.capability;
+      for (const boundary of capability.boundaries ?? []) {
+        if (boundary.kind === "public-key-read") {
+          validatePublicKeyFile(boundary.resource);
+        }
+      }
       const executionController = new AbortController();
       activeExecutions.set(toolCallId, executionController);
       const combinedSignal = signal
@@ -414,10 +421,6 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       return result;
     }
     const command = String((event.input as { command?: unknown }).command ?? "");
-    const classification = classifyBash(command);
-    if (classification.action === "block") {
-      return blockToolCall(classification.reason);
-    }
     const bashInputLock = lockAllowedInput(event, "Review-pending");
     if (bashInputLock) return bashInputLock;
 
@@ -430,6 +433,24 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       return blockToolCall(
         `Invalid explicit permission request: ${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+    const explicitPublicKeys = explicitPlan?.boundaries
+      .filter((boundary) => boundary.kind === "public-key-read") ?? [];
+    if (explicitPublicKeys.length > 0) {
+      if ((loaded.config.boundaryReview ?? DEFAULT_BOUNDARY_REVIEW).publicKeyRead === "block") {
+        return blockToolCall("Validated public-key reads are disabled by boundaryReview.publicKeyRead");
+      }
+      try {
+        for (const boundary of explicitPublicKeys) validatePublicKeyFile(boundary.resource);
+      } catch (error) {
+        return blockToolCall(`Invalid public-key read request: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const classification = classifyBash(command, {
+      publicKeyPaths: explicitPublicKeys.map(({ resource }) => resource),
+    });
+    if (classification.action === "block") {
+      return blockToolCall(classification.reason);
     }
 
     const permissionInspection = await permissions.inspectToolCall(event, ctx);
@@ -473,6 +494,10 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     let executionEnvironment: Record<string, string> | undefined;
     const boundaries: NonNullable<ApprovalCapability["boundaries"]>[number][] = [];
     if (gitPlan) {
+      if (gitPlan.publicKeyError) return blockToolCall(gitPlan.publicKeyError);
+      if (gitPlan.publicKeyRequest && boundaryConfig.publicKeyRead === "block") {
+        return blockToolCall("Validated public-key reads are disabled by boundaryReview.publicKeyRead");
+      }
       if (gitPlan.sshAgentRequest && boundaryConfig.gitSshAgent === "block") {
         return blockToolCall("Git SSH-agent access is disabled by boundaryReview.gitSshAgent");
       }
@@ -481,12 +506,18 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         grantSshAgent: gitPlan.sshAgentRequest !== undefined,
         cwd: ctx.cwd,
       })) {
-        return blockToolCall("The requested Git socket capability conflicts with an explicit sandbox deny");
+        return blockToolCall("The requested Git capability conflicts with an explicit sandbox deny");
       }
-      const materialized = applyGitBoundaryPlan(sandboxSettings, gitPlan, {
-        enableFsmonitor: boundaryConfig.gitFsmonitor,
-        grantSshAgent: gitPlan.sshAgentRequest !== undefined,
-      });
+      let materialized: ReturnType<typeof applyGitBoundaryPlan>;
+      try {
+        materialized = applyGitBoundaryPlan(sandboxSettings, gitPlan, {
+          enableFsmonitor: boundaryConfig.gitFsmonitor,
+          grantSshAgent: gitPlan.sshAgentRequest !== undefined,
+          cwd: ctx.cwd,
+        });
+      } catch (error) {
+        return blockToolCall(`Could not materialize the Git capability: ${error instanceof Error ? error.message : String(error)}`);
+      }
       sandboxSettings = materialized.settings;
       if (Object.keys(materialized.environment).length > 0) {
         executionEnvironment = materialized.environment;
@@ -495,6 +526,10 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         boundaries.push(gitPlan.sshAgentRequest);
         request.minimumLevel = Math.max(request.minimumLevel, 1);
         request.policyReason = `${request.policyReason}; ${gitPlan.sshAgentRequest.reason}. On Linux this disables AF_UNIX isolation for the invocation, exposing Docker, Podman, and other local service sockets and potentially permitting control beyond the sandbox.`;
+      }
+      if (gitPlan.publicKeyRequest) {
+        boundaries.push(gitPlan.publicKeyRequest);
+        request.policyReason = `${request.policyReason}; ${gitPlan.publicKeyRequest.reason}: ${gitPlan.publicKeyRequest.resource}`;
       }
     }
     if (explicitPlan) {
