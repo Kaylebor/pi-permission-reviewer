@@ -99,7 +99,12 @@ export async function invokeModelReviewer(
     };
   }
 
-  const timeout = AbortSignal.timeout(invocation.reviewer.timeoutMs ?? 60_000);
+  const timeoutController = new AbortController();
+  const timeoutHandle = setTimeout(
+    () => timeoutController.abort(new Error("reviewer timed out")),
+    invocation.reviewer.timeoutMs ?? 60_000,
+  );
+  const timeout = timeoutController.signal;
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
   if (combined.aborted) return { kind: "cancelled", error: "reviewer cancelled" };
   try {
@@ -194,6 +199,8 @@ export async function invokeModelReviewer(
           : "failure",
       error: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    clearTimeout(timeoutHandle);
   }
 }
 
