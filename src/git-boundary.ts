@@ -1,4 +1,6 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { constants, closeSync, fstatSync, openSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import type { BoundaryRequest } from "./review-types.ts";
@@ -35,6 +37,9 @@ export interface GitBoundaryPlan {
   sshAgentRequest?: Readonly<BoundaryRequest>;
   sshDestinationRequest?: Readonly<BoundaryRequest>;
   sshAuthSock?: string;
+  knownHostsHome?: string;
+  knownHostsRequests?: readonly Readonly<BoundaryRequest>[];
+  knownHostsError?: string;
   publicKeyRequest?: Readonly<BoundaryRequest>;
   publicKeyError?: string;
 }
@@ -42,7 +47,11 @@ export interface GitBoundaryPlan {
 export async function detectGitBoundary(
   command: string,
   cwd: string,
-  options: { gitBinary?: string; environment?: NodeJS.ProcessEnv } = {},
+  options: {
+    gitBinary?: string;
+    environment?: NodeJS.ProcessEnv;
+    homeDirectory?: string;
+  } = {},
 ): Promise<GitBoundaryPlan | undefined> {
   if (!isAbsolute(cwd)) return;
   const argv = tokenizeDirectCommand(command);
@@ -115,6 +124,24 @@ export async function detectGitBoundary(
       reason: `Git ${builtin} requested SSH access to its resolved remote`,
       platform: process.platform,
     });
+    const knownHostsHome = options.homeDirectory ?? homedir();
+    try {
+      const requests = defaultKnownHostsFiles(knownHostsHome)
+        .filter((path) => validateKnownHostsFile(path, knownHostsHome))
+        .map((resource) => Object.freeze({
+          kind: "filesystem-read" as const,
+          resource,
+          phase: "preflight" as const,
+          reason: `Git ${builtin} requested its validated SSH host-key database`,
+          platform: process.platform,
+        }));
+      if (requests.length > 0) {
+        plan.knownHostsHome = knownHostsHome;
+        plan.knownHostsRequests = Object.freeze(requests);
+      }
+    } catch (error) {
+      plan.knownHostsError = `Configured SSH host-key database is unsafe or invalid: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
   if (sshAuthSock && isAbsolute(sshAuthSock) &&
       (sshDestination !== undefined || signedWithSsh)) {
@@ -221,7 +248,53 @@ export function applyGitBoundaryPlan(
     next.filesystem = filesystem;
     addUnique(filesystem, "allowRead", plan.publicKeyRequest.resource);
   }
+  for (const request of plan.knownHostsRequests ?? []) {
+    if (!validateKnownHostsFile(request.resource, plan.knownHostsHome ?? homedir())) {
+      throw new Error("validated SSH host-key database disappeared before execution");
+    }
+    if (publicKeyConflictsWithDeny(settings, request.resource, options.cwd)) {
+      throw new Error("validated SSH host-key database conflicts with a specific sandbox deny");
+    }
+    const filesystem = record(next.filesystem);
+    next.filesystem = filesystem;
+    addUnique(filesystem, "allowRead", request.resource);
+  }
   return { settings: next, environment };
+}
+
+function defaultKnownHostsFiles(home: string): string[] {
+  if (!isAbsolute(home) || normalize(home) !== home) {
+    throw new Error("home directory must be a normalized absolute path");
+  }
+  return [join(home, ".ssh", "known_hosts"), join(home, ".ssh", "known_hosts2")];
+}
+
+/** Validate metadata only; host-key database contents never leave OpenSSH. */
+function validateKnownHostsFile(path: string, home: string): boolean {
+  if (!defaultKnownHostsFiles(home).includes(path)) {
+    throw new Error("host-key reads require an exact default known_hosts path");
+  }
+  const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+  const nonBlock = process.platform === "win32" ? 0 : constants.O_NONBLOCK;
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | noFollow | nonBlock);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("host-key database must be a regular file");
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new Error("host-key database must be owned by the current user");
+    }
+    if ((stat.mode & 0o022) !== 0) {
+      throw new Error("host-key database must not be group- or world-writable");
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (error instanceof Error && /host-key/.test(error.message)) throw error;
+    throw new Error(`could not safely validate host-key database: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 function isInlinePublicKey(value: string): boolean {
@@ -242,6 +315,9 @@ export function gitBoundaryConflictsWithDeny(
     plan.publicKeyRequest &&
     publicKeyConflictsWithDeny(settings, plan.publicKeyRequest.resource, options.cwd)
   ) return true;
+  if ((plan.knownHostsRequests ?? []).some((request) =>
+    publicKeyConflictsWithDeny(settings, request.resource, options.cwd)
+  )) return true;
   const network = record(settings.network);
   const denied = Array.isArray(network.denyUnixSockets)
     ? network.denyUnixSockets.filter((item): item is string => typeof item === "string")

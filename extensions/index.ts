@@ -590,6 +590,7 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
     const boundaries: NonNullable<ApprovalCapability["boundaries"]>[number][] = [];
     if (gitPlan) {
       if (gitPlan.publicKeyError) return blockToolCall(gitPlan.publicKeyError);
+      if (gitPlan.knownHostsError) return blockToolCall(gitPlan.knownHostsError);
       if (gitPlan.publicKeyRequest && boundaryConfig.publicKeyRead === "block") {
         return blockToolCall("Validated public-key reads are disabled by boundaryReview.publicKeyRead");
       }
@@ -630,6 +631,10 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       if (gitPlan.publicKeyRequest) {
         boundaries.push(gitPlan.publicKeyRequest);
         request.policyReason = `${request.policyReason}; ${gitPlan.publicKeyRequest.reason}: ${gitPlan.publicKeyRequest.resource}`;
+      }
+      for (const knownHostsRequest of gitPlan.knownHostsRequests ?? []) {
+        boundaries.push(knownHostsRequest);
+        request.policyReason = `${request.policyReason}; ${knownHostsRequest.reason}: ${knownHostsRequest.resource}`;
       }
     }
     if (explicitPlan) {

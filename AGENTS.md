@@ -30,9 +30,11 @@
   equivalent capability-bound sandbox broker.
 - Contained Sandbox Runtime execution is the default. `boundaryReview` controls
   the generic public-key-read capability and recognized Git preflight
-  compatibility. The only exception to the built-in blanket `~/.ssh` read deny
-  is an exact, deterministically validated `public-key-read`; more-specific
-  denies and `boundaryReview.publicKeyRead: "block"` remain authoritative.
+  compatibility. The only exceptions to the built-in blanket `~/.ssh` read
+  deny are an exact, deterministically validated `public-key-read` and
+  metadata-validated default `known_hosts` files for recognized SSH Git
+  operations; more-specific denies and `boundaryReview.publicKeyRead: "block"`
+  remain authoritative.
   Linux SSH-agent approval necessarily enables Unix sockets broadly
   for that exact invocation.
 - `boundaryReview.publicKeyRead` either routes an explicit public-key read

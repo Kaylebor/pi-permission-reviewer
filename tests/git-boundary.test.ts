@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -141,13 +141,37 @@ test("signed Git operations reject configured private-key paths", async () => {
 
 test("SSH Git operations derive an exact network destination", async () => {
   const repository = mkdtempSync(join(tmpdir(), "git-ssh-destination-"));
+  const home = join(repository, "home");
+  const sshDirectory = join(home, ".ssh");
+  const knownHosts = join(sshDirectory, "known_hosts");
+  mkdirSync(sshDirectory, { recursive: true, mode: 0o700 });
+  writeFileSync(knownHosts, "github.com ssh-ed25519 test\n", { mode: 0o600 });
   execFileSync("git", ["init", "-q", repository]);
   execFileSync("git", ["-C", repository, "remote", "add", "origin", "git@github.com:owner/repo.git"]);
   const plan = await detectGitBoundary("git push origin main", repository, {
     environment: { SSH_AUTH_SOCK: "/tmp/agent.sock" },
+    homeDirectory: home,
   });
   assert.equal(plan?.sshDestinationRequest?.kind, "network-destination");
   assert.equal(plan?.sshDestinationRequest?.resource, "github.com:22");
-  const applied = applyGitBoundaryPlan({}, plan!, { platform: "darwin", grantSshAgent: true });
+  assert.deepEqual(plan?.knownHostsRequests?.map(({ resource }) => resource), [knownHosts]);
+  const applied = applyGitBoundaryPlan(
+    { filesystem: { denyRead: ["~/.ssh"] } },
+    plan!,
+    { platform: "darwin", grantSshAgent: true },
+  );
   assert.deepEqual((applied.settings.network as { allowedDomains: string[] }).allowedDomains, ["github.com:22"]);
+  assert.deepEqual((applied.settings.filesystem as { allowRead: string[] }).allowRead, [knownHosts]);
+  assert.equal(gitBoundaryConflictsWithDeny(
+    { filesystem: { denyRead: [knownHosts] } },
+    plan!,
+  ), true);
+  assert.throws(
+    () => applyGitBoundaryPlan(
+      { filesystem: { denyRead: [knownHosts] } },
+      plan!,
+      { platform: "darwin", grantSshAgent: true },
+    ),
+    /specific sandbox deny/,
+  );
 });
