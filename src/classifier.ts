@@ -1,5 +1,5 @@
 export interface CommandClassification {
-  action: "skip" | "review" | "human" | "block";
+  action: "skip" | "review" | "block";
   minimumLevel: number;
   reason: string;
 }
@@ -25,7 +25,7 @@ const SHELL_INTERPRETERS = new Set([
   "zsh",
 ]);
 
-const HUMAN_ONLY = [
+const CONSEQUENTIAL_REVIEW = [
   /(?:^|\s)(?:sudo|su)\b/i,
   /(?:^|\s)(?:npm|pnpm|yarn)\s+publish\b/i,
   /(?:^|\s)(?:kubectl|terraform|aws|gcloud|az)\b/i,
@@ -62,11 +62,11 @@ export function classifyBash(
       reason: "shell pipe or redirection requires deep review",
     };
   }
-  if (HUMAN_ONLY.some((pattern) => pattern.test(normalized))) {
+  if (CONSEQUENTIAL_REVIEW.some((pattern) => pattern.test(normalized))) {
     return {
-      action: "human",
+      action: "review",
       minimumLevel: 1,
-      reason: "external, privileged, publishing, or infrastructure side effect",
+      reason: "external, privileged, publishing, or infrastructure side effect requires deep review",
     };
   }
   if (COMPLEX_SHELL.test(maskQuotedDataflowOperators(source))) {

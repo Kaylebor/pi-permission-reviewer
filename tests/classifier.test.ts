@@ -141,7 +141,12 @@ test("deny rules remain authoritative when commands also contain dataflow", () =
   assert.equal(classifyBash("head ~/.aws/credentials > copy.txt").action, "block");
 });
 
-test("publishing and infrastructure actions require a human", () => {
-  assert.equal(classifyBash("git push origin main").action, "human");
-  assert.equal(classifyBash("kubectl get pods").action, "human");
+test("publishing and infrastructure actions enter agentic review", () => {
+  for (const command of ["git push origin main", "kubectl get pods"]) {
+    assert.deepEqual(classifyBash(command), {
+      action: "review",
+      minimumLevel: 1,
+      reason: "external, privileged, publishing, or infrastructure side effect requires deep review",
+    });
+  }
 });

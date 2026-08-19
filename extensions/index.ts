@@ -704,10 +704,6 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
       return result;
     }
 
-    if (classification.action === "human") {
-      return humanReview(event, request, ctx, undefined, () =>
-        rememberCapability());
-    }
     const reviewSignal = ctx.signal
       ? AbortSignal.any([ctx.signal, reviewerLifecycle.signal])
       : reviewerLifecycle.signal;

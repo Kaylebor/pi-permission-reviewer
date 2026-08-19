@@ -303,8 +303,9 @@ JSON:
   unless they contain a pipe or redirection.
 - Uncategorized simple commands start at level 0.
 - Complex shell syntax starts at level 1.
-- Privileged, publishing, infrastructure, and external Git writes go directly
-  to the human.
+- Privileged, publishing, infrastructure, and external Git writes enter level-1
+  agentic review and fall back to the human when the reviewer chain cannot
+  decide.
 - Every pipe or redirection goes to level 1 review after deterministic deny
   rules, even when the base command is normally skipped or human-routed.
 - Recognized credential paths, remote content piped into a shell interpreter,
