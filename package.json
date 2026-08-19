@@ -43,7 +43,7 @@
     ]
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.71",
+    "@anthropic-ai/sandbox-runtime": "github:Kaylebor/sandbox-runtime#ad6a6eb",
     "pi-perm": "0.1.8"
   },
   "bundledDependencies": [
