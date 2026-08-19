@@ -9,6 +9,7 @@ export interface BashPermissionRequest {
   write?: readonly string[];
   unixSockets?: readonly string[];
   sshAgent?: boolean;
+  sshDestination?: { host: string; port?: number };
 }
 
 export interface ExplicitBoundaryPlan {
@@ -29,7 +30,7 @@ export function planExplicitBoundaries(
   if (value === undefined) return;
   if (!isRecord(value)) throw new Error("permissions must be an object");
   for (const key of Object.keys(value)) {
-    if (!new Set(["read", "publicKeyRead", "write", "unixSockets", "sshAgent"]).has(key)) {
+    if (!new Set(["read", "publicKeyRead", "write", "unixSockets", "sshAgent", "sshDestination"]).has(key)) {
       throw new Error(`unsupported permission field: ${key}`);
     }
   }
@@ -41,10 +42,11 @@ export function planExplicitBoundaries(
     throw new Error("permissions.sshAgent must be a boolean");
   }
   const sshAgent = value.sshAgent === true;
-  if (read.length + publicKeyRead.length + write.length + unixSockets.length === 0 && !sshAgent) {
+  const sshDestination = exactSshDestination(value.sshDestination);
+  if (read.length + publicKeyRead.length + write.length + unixSockets.length === 0 && !sshAgent && !sshDestination) {
     throw new Error("permissions must request at least one capability");
   }
-  if (JSON.stringify({ read, publicKeyRead, write, unixSockets, sshAgent }).length > MAX_PERMISSION_REQUEST_LENGTH) {
+  if (JSON.stringify({ read, publicKeyRead, write, unixSockets, sshAgent, sshDestination }).length > MAX_PERMISSION_REQUEST_LENGTH) {
     throw new Error(`permissions request must be at most ${MAX_PERMISSION_REQUEST_LENGTH} characters`);
   }
   const platform = options.platform ?? process.platform;
@@ -76,6 +78,14 @@ export function planExplicitBoundaries(
       platform,
     ));
   }
+  if (sshDestination) {
+    boundaries.push(boundary(
+      "network-destination",
+      formatSshDestination(sshDestination),
+      "Exact SSH destination access was explicitly requested",
+      platform,
+    ));
+  }
   return Object.freeze({
     permissions: Object.freeze({
       ...(read.length ? { read: Object.freeze(read) } : {}),
@@ -83,9 +93,10 @@ export function planExplicitBoundaries(
       ...(write.length ? { write: Object.freeze(write) } : {}),
       ...(unixSockets.length ? { unixSockets: Object.freeze(unixSockets) } : {}),
       ...(sshAgent ? { sshAgent: true } : {}),
+      ...(sshDestination ? { sshDestination: Object.freeze(sshDestination) } : {}),
     }),
     boundaries: Object.freeze(boundaries.map((item) => Object.freeze({ ...item }))),
-    minimumLevel: write.length || unixSockets.length || sshAgent ? 1 : 0,
+    minimumLevel: write.length || unixSockets.length || sshAgent || sshDestination ? 1 : 0,
     policyReason: boundaries.map(({ reason, resource }) => `${reason}: ${resource}`).join("; "),
   });
 }
@@ -120,6 +131,11 @@ export function materializeExplicitBoundaries(
       environment.SSH_AUTH_SOCK = boundary.resource;
       if (platform === "linux") network.allowAllUnixSockets = true;
       else network.allowUnixSockets = append(network.allowUnixSockets, boundary.resource);
+    } else if (boundary.kind === "network-destination") {
+      if (networkDestinationConflictsWithDeny(network, boundary.resource)) {
+        throw new Error(`requested ${boundary.kind} conflicts with an explicit sandbox deny: ${boundary.resource}`);
+      }
+      network.allowedDomains = append(network.allowedDomains, boundary.resource);
     }
   }
   next.filesystem = filesystem;
@@ -149,6 +165,9 @@ export function boundaryConflictsWithDeny(
       : [];
     if (boundary.platform === "linux" && denied.length > 0) return true;
     return pathDeniedBy(boundary.resource, denied, cwd);
+  }
+  if (boundary.kind === "network-destination") {
+    return networkDestinationConflictsWithDeny(network, boundary.resource);
   }
   return true;
 }
@@ -180,6 +199,35 @@ function exactPaths(value: unknown, label: string): string[] {
     return item;
   });
   return [...new Set(result)];
+}
+
+function exactSshDestination(value: unknown): { host: string; port: number } | undefined {
+  if (value === undefined) return;
+  if (!isRecord(value) || typeof value.host !== "string" || !/^[A-Za-z0-9.-]+$/.test(value.host) || value.host.length > 253) {
+    throw new Error("permissions.sshDestination must contain a valid host");
+  }
+  const port = value.port === undefined ? 22 : value.port;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("permissions.sshDestination.port must be an integer between 1 and 65535");
+  }
+  return { host: value.host.toLowerCase(), port };
+}
+
+function formatSshDestination(destination: { host: string; port: number }): string {
+  return `${destination.host}:${destination.port}`;
+}
+
+function networkDestinationConflictsWithDeny(network: Readonly<Record<string, unknown>>, destination: string): boolean {
+  const denied = Array.isArray(network.deniedDomains)
+    ? network.deniedDomains.filter((item): item is string => typeof item === "string")
+    : [];
+  const [host, port] = destination.split(":");
+  return denied.some((pattern) => {
+    const [deniedHost, deniedPort] = pattern.toLowerCase().split(":");
+    const hostMatches = deniedHost === "*" || deniedHost === host ||
+      (deniedHost.startsWith("*.") && host.endsWith(deniedHost.slice(1)));
+    return hostMatches && (!deniedPort || deniedPort === port);
+  });
 }
 
 function isExactAbsolutePath(value: string): boolean {

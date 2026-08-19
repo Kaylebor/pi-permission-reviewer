@@ -70,6 +70,10 @@ const bashPermissionSchema = Type.Optional(Type.Object({
     enum: [true, false],
     description: "Expose SSH_AUTH_SOCK; grants all Unix sockets on Linux",
   })),
+  sshDestination: Type.Optional(Type.Object({
+    host: Type.String({ description: "Exact SSH destination host" }),
+    port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65535, description: "Exact SSH destination port; defaults to 22" })),
+  })),
 }, { additionalProperties: false }));
 
 const guardedBashSchema = Type.Object({
@@ -79,7 +83,7 @@ const guardedBashSchema = Type.Object({
 }, { additionalProperties: false });
 
 const BASH_CAPABILITY_GUIDELINE =
-  "Use bash permissions.read, permissions.publicKeyRead, permissions.write, permissions.unixSockets, or permissions.sshAgent when a contained command needs additional access. publicKeyRead accepts only a validated owner-controlled SSH .pub file and enters permission review even beneath a protected directory. Resubmit the exact command, use normalized absolute paths, and request only the minimum necessary access. Linux Unix-socket and SSH-agent requests grant all Unix sockets for that one invocation.";
+  "Use bash permissions.read, permissions.publicKeyRead, permissions.write, permissions.unixSockets, permissions.sshAgent, or permissions.sshDestination when a contained command needs additional access. publicKeyRead accepts only a validated owner-controlled SSH .pub file and enters permission review even beneath a protected directory. sshDestination accepts one exact host and port for SSH transport. Resubmit the exact command, use normalized absolute paths, and request only the minimum necessary access. Linux Unix-socket and SSH-agent requests grant all Unix sockets for that one invocation.";
 
 const MAIN_AGENT_GUIDANCE_MARKER = "<permission_reviewer_guidance>";
 const EXTENSION_SOURCE_PATH = realpathSync(fileURLToPath(import.meta.url));
@@ -91,7 +95,7 @@ function mainAgentPermissionGuidance(
     ? `For dynamically approved public HTTPS destinations, the sandbox can pause the actual request and show reviewers sanitized method, origin, route shape, categorized header/query names, and bounded body characteristics. Raw header/query values and raw body bytes remain inside the worker. Valid bodies that cannot be completely inspected require ${incompleteBodyApproval === "human" ? "one-call human approval" : "the configured reviewer ladder"} and are never cached.`
     : "Public HTTPS review is destination-only: reviewers cannot inspect HTTP method, path, headers, body, credentials, or the resolved IP.";
   return `${MAIN_AGENT_GUIDANCE_MARKER}
-The bash tool runs commands inside a contained sandbox by default. Do not request broader access speculatively. When a command predictably needs access outside that boundary, include only the minimum exact capability in that bash call's permissions object: read, publicKeyRead, write, unixSockets, or sshAgent. Filesystem and socket paths must be normalized and absolute.
+The bash tool runs commands inside a contained sandbox by default. Do not request broader access speculatively. When a command predictably needs access outside that boundary, include only the minimum exact capability in that bash call's permissions object: read, publicKeyRead, write, unixSockets, sshAgent, or sshDestination. Filesystem and socket paths must be normalized and absolute; sshDestination must contain the exact remote host and port.
 
 Each authorization is a one-use capability bound to the exact tool call, command input, working directory, session, and current configuration. It does not change persistent policy and does not authorize retries or later commands. If a contained call fails for missing access, resubmit the unchanged command as a new call with only the indicated capability.
 
@@ -617,6 +621,11 @@ export default async function permissionReviewer(pi: ExtensionAPI) {
         boundaries.push(gitPlan.sshAgentRequest);
         request.minimumLevel = Math.max(request.minimumLevel, 1);
         request.policyReason = `${request.policyReason}; ${gitPlan.sshAgentRequest.reason}. On Linux this disables AF_UNIX isolation for the invocation, exposing Docker, Podman, and other local service sockets and potentially permitting control beyond the sandbox.`;
+      }
+      if (gitPlan.sshDestinationRequest) {
+        boundaries.push(gitPlan.sshDestinationRequest);
+        request.minimumLevel = Math.max(request.minimumLevel, 1);
+        request.policyReason = `${request.policyReason}; ${gitPlan.sshDestinationRequest.reason}: ${gitPlan.sshDestinationRequest.resource}`;
       }
       if (gitPlan.publicKeyRequest) {
         boundaries.push(gitPlan.publicKeyRequest);

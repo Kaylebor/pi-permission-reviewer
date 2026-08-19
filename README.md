@@ -345,14 +345,16 @@ The registered `bash` tool accepts an optional structured permission request:
     "publicKeyRead": ["/home/alice/.ssh/signing.pub"],
     "write": ["/outside/result"],
     "unixSockets": ["/run/example.sock"],
-    "sshAgent": true
+    "sshAgent": true,
+    "sshDestination": { "host": "github.com", "port": 22 }
   }
 }
 ```
 
 Each path must be normalized, absolute, glob-free, no list may contain more
 than 16 paths, and the complete permission object is capped at 4,096
-characters. `publicKeyRead` is the sole semantic exception to the blanket
+characters. `sshDestination` is an exact SSH host and port (defaulting to 22),
+and materializes as a one-invocation SRT network allow entry. `publicKeyRead` is the sole semantic exception to the blanket
 `~/.ssh` read deny: each exact `.pub` path must be a small, regular,
 non-symlink, owner-controlled, non-writable SSH public-key file. A more-specific
 configured deny for that file remains authoritative, and the file is
@@ -383,7 +385,10 @@ Every command starts with frozen contained Sandbox Runtime settings. Recognized
 Git operations may request only the configured preflight compatibility paths:
 `gitFsmonitor` provides the platform-specific fsmonitor handling without
 changing user Git configuration, and `gitSshAgent` either blocks or routes a
-Git SSH-agent request through the reviewer chain. Local binding remains blocked.
+Git SSH-agent request through the reviewer chain. Recognized SSH `push`, `fetch`,
+and `pull` operations also derive the exact remote host and port as a
+preflight network capability; this is not a persistent domain whitelist.
+Local binding remains blocked.
 For SSH-signed commits and tags, Git detection also derives the same generic
 `public-key-read` capability from `user.signingKey`; it never grants a private
 key path. Git detection is a convenience producer over the same frozen

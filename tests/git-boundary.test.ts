@@ -138,3 +138,16 @@ test("signed Git operations reject configured private-key paths", async () => {
   assert.match(plan?.publicKeyError ?? "", /public \.pub file/);
   assert.equal(plan?.publicKeyRequest, undefined);
 });
+
+test("SSH Git operations derive an exact network destination", async () => {
+  const repository = mkdtempSync(join(tmpdir(), "git-ssh-destination-"));
+  execFileSync("git", ["init", "-q", repository]);
+  execFileSync("git", ["-C", repository, "remote", "add", "origin", "git@github.com:owner/repo.git"]);
+  const plan = await detectGitBoundary("git push origin main", repository, {
+    environment: { SSH_AUTH_SOCK: "/tmp/agent.sock" },
+  });
+  assert.equal(plan?.sshDestinationRequest?.kind, "network-destination");
+  assert.equal(plan?.sshDestinationRequest?.resource, "github.com:22");
+  const applied = applyGitBoundaryPlan({}, plan!, { platform: "darwin", grantSshAgent: true });
+  assert.deepEqual((applied.settings.network as { allowedDomains: string[] }).allowedDomains, ["github.com:22"]);
+});

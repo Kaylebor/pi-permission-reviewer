@@ -22,6 +22,7 @@ test("plans exact explicit access with review levels matching consequence", () =
     write: ["/repo/result.txt"],
     unixSockets: ["/tmp/service.sock"],
     sshAgent: true,
+    sshDestination: { host: "github.com", port: 22 },
   }, {
     platform: "linux",
     environment: { SSH_AUTH_SOCK: "/tmp/agent.sock" },
@@ -31,6 +32,7 @@ test("plans exact explicit access with review levels matching consequence", () =
     "filesystem-write",
     "unix-socket",
     "ssh-agent",
+    "network-destination",
   ]);
   assert.match(consequential?.policyReason ?? "", /disables AF_UNIX isolation/);
 });
@@ -59,6 +61,7 @@ test("materializes only reviewed capabilities and preserves deterministic denies
     write: ["/repo/output.txt"],
     unixSockets: ["/tmp/service.sock"],
     sshAgent: true,
+    sshDestination: { host: "github.com", port: 22 },
   }, {
     platform: "darwin",
     environment: { SSH_AUTH_SOCK: "/tmp/agent.sock" },
@@ -69,7 +72,7 @@ test("materializes only reviewed capabilities and preserves deterministic denies
         allowRead: ["/repo/input.txt"],
         allowWrite: ["/repo/output.txt"],
       },
-      network: { allowUnixSockets: ["/tmp/service.sock", "/tmp/agent.sock"] },
+      network: { allowUnixSockets: ["/tmp/service.sock", "/tmp/agent.sock"], allowedDomains: ["github.com:22"] },
     },
     environment: { SSH_AUTH_SOCK: "/tmp/agent.sock" },
   });

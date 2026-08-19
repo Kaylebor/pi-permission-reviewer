@@ -33,6 +33,7 @@ export interface GitBoundaryPlan {
   repositoryRoot?: string;
   fsmonitorSocket?: string;
   sshAgentRequest?: Readonly<BoundaryRequest>;
+  sshDestinationRequest?: Readonly<BoundaryRequest>;
   sshAuthSock?: string;
   publicKeyRequest?: Readonly<BoundaryRequest>;
   publicKeyError?: string;
@@ -67,9 +68,10 @@ export async function detectGitBoundary(
   }
   const environment = options.environment ?? process.env;
   const sshAuthSock = environment.SSH_AUTH_SOCK;
-  const remoteUsesSsh = SSH_REMOTE_BUILTINS.has(builtin) &&
-    await gitRemoteUsesSsh(gitBinary, cwd, builtin, argv.slice(2)) &&
-    !await gitOutput(gitBinary, cwd, ["config", "--get", "core.sshCommand"]);
+  const sshDestination = SSH_REMOTE_BUILTINS.has(builtin) &&
+    !await gitOutput(gitBinary, cwd, ["config", "--get", "core.sshCommand"])
+    ? await gitRemoteSshDestination(gitBinary, cwd, builtin, argv.slice(2))
+    : undefined;
   const signedByArgument = requestsSignature(argv.slice(2));
   const signedByConfig = builtin === "commit"
     ? await gitBoolean(gitBinary, cwd, "commit.gpgSign")
@@ -105,8 +107,17 @@ export async function detectGitBoundary(
       }
     }
   }
+  if (sshDestination) {
+    plan.sshDestinationRequest = Object.freeze({
+      kind: "network-destination",
+      resource: `${sshDestination.host}:${sshDestination.port}`,
+      phase: "preflight",
+      reason: `Git ${builtin} requested SSH access to its resolved remote`,
+      platform: process.platform,
+    });
+  }
   if (sshAuthSock && isAbsolute(sshAuthSock) &&
-      (remoteUsesSsh || signedWithSsh)) {
+      (sshDestination !== undefined || signedWithSsh)) {
     plan.sshAuthSock = sshAuthSock;
     plan.sshAgentRequest = Object.freeze({
       kind: "ssh-agent",
@@ -119,14 +130,14 @@ export async function detectGitBoundary(
   return plan;
 }
 
-async function gitRemoteUsesSsh(
+async function gitRemoteSshDestination(
   binary: string,
   cwd: string,
   builtin: string,
   args: readonly string[],
-): Promise<boolean> {
+): Promise<{ host: string; port: number } | undefined> {
   const candidate = firstRemoteArgument(args);
-  if (candidate && looksLikeRemoteUrl(candidate)) return isSshRemote(candidate);
+  if (candidate && looksLikeRemoteUrl(candidate)) return parseSshDestination(candidate);
   let remote = candidate;
   if (!remote && (builtin === "pull" || builtin === "push")) {
     const upstream = await gitOutput(binary, cwd, [
@@ -136,7 +147,7 @@ async function gitRemoteUsesSsh(
   }
   remote ??= "origin";
   const url = await gitOutput(binary, cwd, ["remote", "get-url", remote]);
-  return url ? isSshRemote(url) : false;
+  return url ? parseSshDestination(url) : undefined;
 }
 
 function firstRemoteArgument(args: readonly string[]): string | undefined {
@@ -163,6 +174,17 @@ function isSshRemote(value: string): boolean {
   return /^ssh:\/\//i.test(value) || /^[^/@\s]+@[^/:\s]+:.+/.test(value);
 }
 
+function parseSshDestination(value: string): { host: string; port: number } | undefined {
+  if (/^ssh:\/\//i.test(value)) {
+    try {
+      const url = new URL(value);
+      return url.hostname ? { host: url.hostname.toLowerCase(), port: Number(url.port) || 22 } : undefined;
+    } catch { return undefined; }
+  }
+  const match = value.match(/^[^/@\s]+@([^/:\s]+):.+$/);
+  return match ? { host: match[1]!.toLowerCase(), port: 22 } : undefined;
+}
+
 export function applyGitBoundaryPlan(
   settings: Readonly<Record<string, unknown>>,
   plan: GitBoundaryPlan,
@@ -186,6 +208,9 @@ export function applyGitBoundaryPlan(
     environment.SSH_AUTH_SOCK = plan.sshAuthSock;
     if (platform === "darwin") addUnique(network, "allowUnixSockets", plan.sshAuthSock);
     else if (platform === "linux") network.allowAllUnixSockets = true;
+  }
+  if (plan.sshDestinationRequest) {
+    addUnique(network, "allowedDomains", plan.sshDestinationRequest.resource);
   }
   if (plan.publicKeyRequest) {
     validatePublicKeyFile(plan.publicKeyRequest.resource);
@@ -229,9 +254,26 @@ export function gitBoundaryConflictsWithDeny(
     ...(options.enableFsmonitor === false ? [] : [plan.fsmonitorSocket]),
     ...(options.grantSshAgent ? [plan.sshAuthSock] : []),
   ].filter((item): item is string => typeof item === "string");
+  if (plan.sshDestinationRequest) {
+    const deniedDomains = Array.isArray(network.deniedDomains)
+      ? network.deniedDomains.filter((item): item is string => typeof item === "string")
+      : [];
+    if (deniedDomains.some((pattern) => networkDestinationPatternMatches(
+      pattern,
+      plan.sshDestinationRequest!.resource,
+    ))) return true;
+  }
   return resources.some((resource) => denied.some((pattern) =>
     unixSocketPatternMatches(resource, pattern, options.cwd ?? process.cwd()),
   ));
+}
+
+function networkDestinationPatternMatches(pattern: string, destination: string): boolean {
+  const [host, port] = destination.toLowerCase().split(":");
+  const [deniedHost, deniedPort] = pattern.toLowerCase().split(":");
+  const hostMatches = deniedHost === "*" || deniedHost === host ||
+    (deniedHost.startsWith("*.") && host.endsWith(deniedHost.slice(1)));
+  return hostMatches && (!deniedPort || deniedPort === port);
 }
 
 function tokenizeDirectCommand(command: string): string[] | undefined {
